@@ -37,7 +37,9 @@ endif
 # Herramienta que genera el .prx (se puede cambiar: make FSELF=/ruta/create-fself)
 FSELF ?= $(TOOLCHAIN)/bin/$(CDIR)/create-fself
 
-all: $(TARGET)
+PROBE      := kbm_probe.prx
+
+all: $(TARGET) $(PROBE)
 
 $(INTDIR):
 	@mkdir -p $(INTDIR)
@@ -57,7 +59,18 @@ $(TARGET): $(CRT_OBJ) $(OBJS)
 	$(FSELF) -in=$(INTDIR)/kbm_pad.elf \
 	  -out=$(INTDIR)/kbm_pad.oelf --lib=$(TARGET) --paid 0x3800000000000011
 
+# Plugin minimo de diagnostico: solo libkernel (ver probe/probe.c)
+$(INTDIR)/probe_%.o: probe/%.c | $(INTDIR)
+	$(CC) $(CFLAGS) -o $@ $<
+
+$(PROBE): $(CRT_OBJ) $(INTDIR)/probe_probe.o
+	$(LD) $(INTDIR)/probe_probe.o $(CRT_OBJ) -o $(INTDIR)/kbm_probe.elf \
+	  -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
+	  --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib -lkernel -lSceLibcInternal
+	$(FSELF) -in=$(INTDIR)/kbm_probe.elf \
+	  -out=$(INTDIR)/kbm_probe.oelf --lib=$(PROBE) --paid 0x3800000000000011
+
 clean:
-	rm -rf $(INTDIR) $(TARGET)
+	rm -rf $(INTDIR) $(TARGET) $(PROBE)
 
 .PHONY: all clean

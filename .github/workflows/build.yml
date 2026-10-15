@@ -78,5 +78,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kbm_pad-prx
-          path: kbm_pad.prx
+          path: |
+            kbm_pad.prx
+            kbm_probe.prx
           if-no-files-found: error
