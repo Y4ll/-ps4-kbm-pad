@@ -142,6 +142,29 @@ extern int32_t sceMouseRead(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
+/* ------------------------------------------------- NOTIFICACIONES */
+/* Aviso en pantalla (el toast de la PS4) via libkernel, sin librerias extra.
+ * Layout de la peticion: 45 bytes sin uso + 3075 de texto = 3120 en total.
+ * Sin verificar en 13.52. La etiqueta asm evita chocar con cualquier
+ * declaracion distinta que traiga el header del toolchain. */
+typedef struct KbmNotifyRequest {
+    char unused[45];
+    char message[3075];
+} KbmNotifyRequest;
+
+extern int32_t kbm_send_notification(int32_t device, KbmNotifyRequest *req,
+                                     size_t size, int32_t blocking)
+    __asm__("sceKernelSendNotificationRequest");
+
+static void notify(const char *msg)
+{
+    KbmNotifyRequest req;
+    memset(&req, 0, sizeof(req));
+    snprintf(req.message, sizeof(req.message), "%s", msg);
+    int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
+    klog("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
+}
+
 /* ------------------------------------------------------------ ESTADO */
 typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
 typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
@@ -175,6 +198,13 @@ static void ensure_input(void)
     g_mouse = sceMouseOpen(user, 0, 0, NULL);
 
     klog("[kbm_pad] user=%d keyboard=%d mouse=%d\n", user, g_kb, g_mouse);
+
+    /* Se ejecuta en la primera llamada al hook: si este aviso sale, el hook
+     * del mando SI se esta disparando. */
+    char msg[96];
+    snprintf(msg, sizeof(msg), "kbm_pad: teclado=%s, raton=%s",
+             g_kb >= 0 ? "OK" : "FALLO", g_mouse >= 0 ? "OK" : "FALLO");
+    notify(msg);
 
     if (g_kb < 0 && g_mouse < 0) {
         klog("[kbm_pad] no se abrio ni teclado ni raton\n");
@@ -212,6 +242,7 @@ static void apply_kbm(KbmPadData *d)
     if (t && !g_toggle_down) {
         g_enabled = !g_enabled;
         klog("[kbm_pad] %s\n", g_enabled ? "ACTIVO" : "PAUSA");
+        notify(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
     }
     g_toggle_down = t;
 
@@ -331,6 +362,7 @@ int module_start(size_t argc, const void *args)
 {
     (void)argc; (void)args;
     klog("[kbm_pad] cargado\n");
+    notify("kbm_pad cargado");
     HOOK(scePadReadState);
     HOOK(scePadRead);
     return 0;
