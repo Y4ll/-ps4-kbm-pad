@@ -144,13 +144,31 @@ extern int32_t sceMouseRead(int32_t handle, void *data, int32_t count);
 
 /* ------------------------------------------------- NOTIFICACIONES */
 /* Aviso en pantalla (el toast de la PS4) via libkernel, sin librerias extra.
- * Layout de la peticion: 45 bytes sin uso + 3075 de texto = 3120 en total.
- * Sin verificar en 13.52. La etiqueta asm evita chocar con cualquier
- * declaracion distinta que traiga el header del toolchain. */
+ * Layout copiado (verificado desensamblando plugin_template.prx de GoldHEN):
+ * 11 enteros de cabecera, 1 byte useIconImageUri, y 3 bloques de 1024 bytes
+ * (mensaje, URI del icono, sin uso) = 3120 bytes. El campo target_id DEBE ser
+ * -1 (todos los usuarios); con 0 la PS4 descarta el aviso y no sale nada.
+ * La etiqueta asm evita chocar con cualquier declaracion distinta que traiga
+ * el header del toolchain. */
 typedef struct KbmNotifyRequest {
-    char unused[45];
-    char message[3075];
+    int32_t type;
+    int32_t req_id;
+    int32_t priority;
+    int32_t msg_id;
+    int32_t target_id;
+    int32_t user_id;
+    int32_t unk1;
+    int32_t unk2;
+    int32_t app_id;
+    int32_t error_num;
+    int32_t unk3;
+    uint8_t use_icon_image_uri;
+    char    message[1024];
+    char    icon_image_uri[1024];
+    char    unk[1024];
 } KbmNotifyRequest;
+
+_Static_assert(sizeof(KbmNotifyRequest) == 3120, "KbmNotifyRequest debe medir 3120");
 
 extern int32_t kbm_send_notification(int32_t device, KbmNotifyRequest *req,
                                      size_t size, int32_t blocking)
@@ -160,7 +178,12 @@ static void notify(const char *msg)
 {
     KbmNotifyRequest req;
     memset(&req, 0, sizeof(req));
+    req.type = 0;
+    req.target_id = -1;
+    req.use_icon_image_uri = 1;
     snprintf(req.message, sizeof(req.message), "%s", msg);
+    snprintf(req.icon_image_uri, sizeof(req.icon_image_uri), "%s",
+             "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
     klog("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
 }
