@@ -16,16 +16,26 @@ jobs:
       - name: Pull OpenOrbis toolchain image
         run: docker pull openorbisofficial/toolchain:latest
 
-      - name: Show available stub libraries (diagnostico)
+      - name: Show toolchain info (diagnostico)
         run: |
-          docker run --rm --user root openorbisofficial/toolchain:latest \
-            bash -c 'ls "$OO_PS4_TOOLCHAIN/lib" | grep -i -E "pad|mouse|keyboard|userservice|sysmodule|kernel|libc" || true'
+          libs=$(docker run --rm --user root openorbisofficial/toolchain:latest \
+            bash -c 'ls "$OO_PS4_TOOLCHAIN/lib" | grep -i -E "pad|mouse|keyboard|userservice|sysmodule|kernel|libc" | tr "\n" " "; echo; ls "$OO_PS4_TOOLCHAIN/bin/linux" | tr "\n" " "; echo; which clang-12 ld.lld-12 clang ld.lld | tr "\n" " "' 2>&1 || true)
+          echo "::notice title=Toolchain info::$(printf '%s' "$libs" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
 
       - name: Build kbm_pad.prx
         run: |
+          set +e
           docker run --rm --user root -w /workspace -v "$PWD":/workspace \
             openorbisofficial/toolchain:latest \
-            make CC=clang-12 LD=ld.lld-12
+            make CC=clang-12 LD=ld.lld-12 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            errs=$(grep -n -i -E "error|undefined|cannot find|not found|No rule|\*\*\*" build.log | head -40)
+            last=$(tail -25 build.log)
+            report=$(printf '%s\n--- tail ---\n%s' "$errs" "$last")
+            echo "::error title=Build failed (exit $rc)::$(printf '%s' "$report" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
+          fi
+          exit $rc
 
       - name: Check output
         run: |
