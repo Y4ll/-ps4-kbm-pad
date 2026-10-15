@@ -16,10 +16,36 @@
 #include <orbis/Sysmodule.h>
 #include <orbis/UserService.h>
 #include <orbis/Pad.h>
-#include <orbis/Keyboard.h>
 
 #include "Detour.h"
 #include "Utilities.h"
+
+/* ------------------------------------------------ TECLADO (sin header) */
+/* Las releases de OpenOrbis no traen orbis/Keyboard.h; estos tipos son los
+ * del header de la rama master. */
+#define ORBIS_KEYBOARD_MOD_LEFT_CTRL   1
+#define ORBIS_KEYBOARD_MOD_LEFT_SHIFT  2
+#define ORBIS_KEYBOARD_MOD_RIGHT_CTRL  16
+#define ORBIS_KEYBOARD_MOD_RIGHT_SHIFT 32
+#define ORBIS_KEYBOARD_KEY_F8          65
+
+typedef struct OrbisKeyboardData {
+    uint32_t timestamp;
+    uint8_t  padding[12];
+    int32_t  unk1;
+    int32_t  nkeys;
+    uint32_t locks;
+    uint32_t mods;
+    uint16_t keycodes[32];
+} OrbisKeyboardData;
+
+extern int32_t sceKeyboardInit(void);
+extern int32_t sceKeyboardOpen(int32_t userID, int32_t type, int32_t index, void *param);
+extern int32_t sceKeyboardReadState(int32_t handle, OrbisKeyboardData *data);
+
+/* IDs de sysmodule (libSceKeyboard.sprx / libSceMouse.sprx) */
+#define KBM_SYSMODULE_KEYBOARD 0x0106
+#define KBM_SYSMODULE_MOUSE    0x00A9
 
 /* ------------------------------------------------------------ CONFIG */
 #define MOUSE_SENS      6.0f    /* sube = stick derecho mas sensible   */
@@ -93,8 +119,8 @@ static void ensure_input(void)
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
 
-    sceSysmoduleLoadModule(ORBIS_SYSMODULE_KEYBOARD);
-    sceSysmoduleLoadModule(ORBIS_SYSMODULE_MOUSE);
+    sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
+    sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
 
     sceKeyboardInit();
     g_kb = sceKeyboardOpen(user, 0, 0, NULL);
