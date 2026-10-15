@@ -34,6 +34,18 @@ Ajustes (sensibilidad, inercia, invertir Y, tecla de pausa) al inicio de `src/ma
 
 El SDK de plugins de GoldHEN (MIT) viene incluido en `sdk/`.
 
+### Compilar en GitHub (sin instalar nada)
+
+El repo incluye `.github/workflows/build.yml`, que compila el plugin con la imagen
+Docker oficial de OpenOrbis (`openorbisofficial/toolchain`).
+
+1. En GitHub, abre la pestaña **Actions** del repo.
+2. Elige **Build kbm_pad.prx** y pulsa **Run workflow** (también corre solo en cada push a `main`).
+3. Cuando termine, abre la ejecución y descarga el artefacto **kbm_pad-prx** (un zip con `kbm_pad.prx`).
+
+Si falla en el enlace, el paso "Show available stub libraries" lista las librerías del
+toolchain; si faltan `libSceMouse` o `libSceKeyboard`, ese es el problema.
+
 ## Instalar en la PS4
 
 1. Copia `kbm_pad.prx` a `/data/GoldHEN/plugins/`.

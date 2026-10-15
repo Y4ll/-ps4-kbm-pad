@@ -1,0 +1,40 @@
+name: Build kbm_pad.prx
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull OpenOrbis toolchain image
+        run: docker pull openorbisofficial/toolchain:latest
+
+      - name: Show available stub libraries (diagnostico)
+        run: |
+          docker run --rm --user root openorbisofficial/toolchain:latest \
+            bash -c 'ls "$OO_PS4_TOOLCHAIN/lib" | grep -i -E "pad|mouse|keyboard|userservice|sysmodule|kernel|libc" || true'
+
+      - name: Build kbm_pad.prx
+        run: |
+          docker run --rm --user root -w /workspace -v "$PWD":/workspace \
+            openorbisofficial/toolchain:latest \
+            make CC=clang-12 LD=ld.lld-12
+
+      - name: Check output
+        run: |
+          ls -l kbm_pad.prx
+          file kbm_pad.prx || true
+
+      - name: Upload kbm_pad.prx
+        uses: actions/upload-artifact@v4
+        with:
+          name: kbm_pad-prx
+          path: kbm_pad.prx
+          if-no-files-found: error
