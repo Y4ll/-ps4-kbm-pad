@@ -22,7 +22,7 @@ CFLAGS     := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include \
               -Isdk/include -Wall
 LDFLAGS    := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
-              --eh-frame-hdr -L$(TOOLCHAIN)/lib $(LIBS)
+              --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib $(LIBS)
 
 CC := clang
 LD := ld.lld

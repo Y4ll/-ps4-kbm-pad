@@ -63,6 +63,16 @@ jobs:
         run: |
           ls -l kbm_pad.prx
           file kbm_pad.prx || true
+          echo "Simbolos exportados que necesita el plugin_loader de GoldHEN:"
+          for s in plugin_load plugin_unload g_pluginName module_start module_stop; do
+            in_elf=NO; in_prx=NO
+            strings -a build/kbm_pad.elf | grep -qx "$s" && in_elf=si
+            strings -a kbm_pad.prx | grep -qx "$s" && in_prx=si
+            echo "$s  elf=$in_elf  prx=$in_prx"
+            [ "$in_elf" = si ] || missing=1
+            [ "$in_prx" = si ] || echo "::warning title=Simbolo no visible en el .prx::$s"
+          done
+          [ -z "$missing" ] || { echo "::error title=Falta simbolo exportado::revisa visibilidad/linker"; exit 1; }
 
       - name: Upload kbm_pad.prx
         uses: actions/upload-artifact@v4

@@ -380,22 +380,65 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
     return ret;
 }
 
-/* ------------------------------------------------------ ENTRY POINTS */
-int module_start(size_t argc, const void *args)
+/* ---------------------------------------------- INICIO / FIN (idempotentes) */
+static bool g_hooked;
+
+static void kbm_start(void)
 {
-    (void)argc; (void)args;
+    if (g_hooked)
+        return;
+    g_hooked = true;
     klog("[kbm_pad] cargado\n");
     notify("kbm_pad cargado");
     HOOK(scePadReadState);
     HOOK(scePadRead);
-    return 0;
 }
 
-int module_stop(size_t argc, const void *args)
+static void kbm_stop(void)
 {
-    (void)argc; (void)args;
+    if (!g_hooked)
+        return;
+    g_hooked = false;
     UNHOOK(scePadReadState);
     UNHOOK(scePadRead);
     klog("[kbm_pad] descargado\n");
+}
+
+/* ------------------------------------------------------ ENTRY POINTS */
+/* El plugin_loader.prx de GoldHEN carga el modulo, busca con sceKernelDlsym
+ * g_pluginName / plugin_load / plugin_unload y, si faltan plugin_load o
+ * plugin_unload, NO da el plugin por cargado. Por eso se exportan con
+ * visibilidad por defecto (no static). */
+__attribute__((visibility("default"))) const char *g_pluginName = "kbm_pad";
+
+__attribute__((visibility("default")))
+int plugin_load(int argc, const char *argv[])
+{
+    (void)argc; (void)argv;
+    kbm_start();
+    return 0;   /* 0 = cargado; otro valor hace que el loader llame a plugin_unload */
+}
+
+__attribute__((visibility("default")))
+int plugin_unload(int argc, const char *argv[])
+{
+    (void)argc; (void)argv;
+    kbm_stop();
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int module_start(size_t argc, const void *args)
+{
+    (void)argc; (void)args;
+    kbm_start();
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int module_stop(size_t argc, const void *args)
+{
+    (void)argc; (void)args;
+    kbm_stop();
     return 0;
 }
