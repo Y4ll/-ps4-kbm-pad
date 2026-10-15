@@ -15,10 +15,56 @@
 #include <orbis/libkernel.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/UserService.h>
-#include <orbis/Pad.h>
 
 #include "Detour.h"
 #include "Utilities.h"
+
+/* ------------------------------------------------- MANDO (sin header) */
+/* El layout de KbmPadData cambia entre releases de OpenOrbis; aqui va el
+ * de la rama master (el real de ScePadData). Importa el orden y el tamano. */
+#define KBM_PAD_BUTTON_L3        0x0002
+#define KBM_PAD_BUTTON_R3        0x0004
+#define KBM_PAD_BUTTON_OPTIONS   0x0008
+#define KBM_PAD_BUTTON_UP        0x0010
+#define KBM_PAD_BUTTON_RIGHT     0x0020
+#define KBM_PAD_BUTTON_DOWN      0x0040
+#define KBM_PAD_BUTTON_LEFT      0x0080
+#define KBM_PAD_BUTTON_L2        0x0100
+#define KBM_PAD_BUTTON_R2        0x0200
+#define KBM_PAD_BUTTON_L1        0x0400
+#define KBM_PAD_BUTTON_R1        0x0800
+#define KBM_PAD_BUTTON_TRIANGLE  0x1000
+#define KBM_PAD_BUTTON_CIRCLE    0x2000
+#define KBM_PAD_BUTTON_CROSS     0x4000
+#define KBM_PAD_BUTTON_SQUARE    0x8000
+#define KBM_PAD_BUTTON_TOUCH_PAD 0x100000
+
+typedef struct { float x, y, z; } KbmVec3;
+typedef struct { float x, y, z, w; } KbmVec4;
+typedef struct { uint8_t x, y; } KbmStick;
+typedef struct { uint8_t l2, r2; } KbmAnalog;
+typedef struct { uint16_t x, y; uint8_t finger; uint8_t pad[3]; } KbmTouch;
+typedef struct { uint8_t fingers; uint8_t pad1[3]; uint32_t pad2; KbmTouch touch[2]; } KbmTouchData;
+
+typedef struct KbmPadData {
+    uint32_t     buttons;
+    KbmStick     leftStick;
+    KbmStick     rightStick;
+    KbmAnalog    analogButtons;
+    uint16_t     padding;
+    KbmVec4      orientation;
+    KbmVec3      acceleration;
+    KbmVec3      angularVelocity;
+    KbmTouchData touch;
+    uint8_t      connected;
+    uint64_t     timestamp;
+    uint8_t      ext[16];
+    uint8_t      count;
+    uint8_t      unknown[15];
+} KbmPadData;
+
+extern int32_t scePadRead(int32_t handle, KbmPadData *data, int32_t count);
+extern int32_t scePadReadState(int32_t handle, KbmPadData *data);
 
 /* ------------------------------------------------ TECLADO (sin header) */
 /* Las releases de OpenOrbis no traen orbis/Keyboard.h; estos tipos son los
@@ -97,8 +143,8 @@ extern int32_t sceMouseRead(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_RIGHT 0x2
 
 /* ------------------------------------------------------------ ESTADO */
-typedef int32_t (*scePadReadState_t)(int32_t, OrbisPadData *);
-typedef int32_t (*scePadRead_t)(int32_t, OrbisPadData *, int32_t);
+typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
+typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
 
 HOOK_INIT(scePadReadState);
 HOOK_INIT(scePadRead);
@@ -153,8 +199,8 @@ static uint8_t to_axis(float v)   /* -1..1 -> 0..255 */
     return (uint8_t)(128.0f + v * 127.0f);
 }
 
-/* Mezcla teclado + raton en un OrbisPadData. */
-static void apply_kbm(OrbisPadData *d)
+/* Mezcla teclado + raton en un KbmPadData. */
+static void apply_kbm(KbmPadData *d)
 {
     OrbisKeyboardData kd;
     memset(&kd, 0, sizeof(kd));
@@ -212,32 +258,32 @@ static void apply_kbm(OrbisPadData *d)
     }
 
     /* Gatillos: clic izq = R2, clic der = L2 */
-    if (mbtn & MOUSE_BTN_LEFT)  { d->buttons |= ORBIS_PAD_BUTTON_R2; d->analogButtons.r2 = 255; }
-    if (mbtn & MOUSE_BTN_RIGHT) { d->buttons |= ORBIS_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
+    if (mbtn & MOUSE_BTN_LEFT)  { d->buttons |= KBM_PAD_BUTTON_R2; d->analogButtons.r2 = 255; }
+    if (mbtn & MOUSE_BTN_RIGHT) { d->buttons |= KBM_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
 
     /* Botones */
-    if (has_key(&kd, K_SPACE)) d->buttons |= ORBIS_PAD_BUTTON_CROSS;
-    if (has_key(&kd, K_E))     d->buttons |= ORBIS_PAD_BUTTON_CIRCLE;
-    if (has_key(&kd, K_Q))     d->buttons |= ORBIS_PAD_BUTTON_SQUARE;
-    if (has_key(&kd, K_R))     d->buttons |= ORBIS_PAD_BUTTON_TRIANGLE;
-    if (has_key(&kd, K_F))     d->buttons |= ORBIS_PAD_BUTTON_L1;
-    if (has_key(&kd, K_G))     d->buttons |= ORBIS_PAD_BUTTON_R1;
-    if (has_key(&kd, K_ENTER)) d->buttons |= ORBIS_PAD_BUTTON_OPTIONS;
-    if (has_key(&kd, K_TAB))   d->buttons |= ORBIS_PAD_BUTTON_TOUCH_PAD;
+    if (has_key(&kd, K_SPACE)) d->buttons |= KBM_PAD_BUTTON_CROSS;
+    if (has_key(&kd, K_E))     d->buttons |= KBM_PAD_BUTTON_CIRCLE;
+    if (has_key(&kd, K_Q))     d->buttons |= KBM_PAD_BUTTON_SQUARE;
+    if (has_key(&kd, K_R))     d->buttons |= KBM_PAD_BUTTON_TRIANGLE;
+    if (has_key(&kd, K_F))     d->buttons |= KBM_PAD_BUTTON_L1;
+    if (has_key(&kd, K_G))     d->buttons |= KBM_PAD_BUTTON_R1;
+    if (has_key(&kd, K_ENTER)) d->buttons |= KBM_PAD_BUTTON_OPTIONS;
+    if (has_key(&kd, K_TAB))   d->buttons |= KBM_PAD_BUTTON_TOUCH_PAD;
     if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_SHIFT | ORBIS_KEYBOARD_MOD_RIGHT_SHIFT))
-        d->buttons |= ORBIS_PAD_BUTTON_L3;
+        d->buttons |= KBM_PAD_BUTTON_L3;
     if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_CTRL | ORBIS_KEYBOARD_MOD_RIGHT_CTRL))
-        d->buttons |= ORBIS_PAD_BUTTON_R3;
+        d->buttons |= KBM_PAD_BUTTON_R3;
 
     /* D-pad: flechas */
-    if (has_key(&kd, K_UP))    d->buttons |= ORBIS_PAD_BUTTON_UP;
-    if (has_key(&kd, K_DOWN))  d->buttons |= ORBIS_PAD_BUTTON_DOWN;
-    if (has_key(&kd, K_LEFT))  d->buttons |= ORBIS_PAD_BUTTON_LEFT;
-    if (has_key(&kd, K_RIGHT)) d->buttons |= ORBIS_PAD_BUTTON_RIGHT;
+    if (has_key(&kd, K_UP))    d->buttons |= KBM_PAD_BUTTON_UP;
+    if (has_key(&kd, K_DOWN))  d->buttons |= KBM_PAD_BUTTON_DOWN;
+    if (has_key(&kd, K_LEFT))  d->buttons |= KBM_PAD_BUTTON_LEFT;
+    if (has_key(&kd, K_RIGHT)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
 }
 
-/* Rellena un OrbisPadData neutro cuando no hay mando fisico. */
-static void fake_pad(OrbisPadData *d)
+/* Rellena un KbmPadData neutro cuando no hay mando fisico. */
+static void fake_pad(KbmPadData *d)
 {
     memset(d, 0, sizeof(*d));
     d->leftStick.x = d->leftStick.y = 128;
@@ -248,7 +294,7 @@ static void fake_pad(OrbisPadData *d)
 }
 
 /* ------------------------------------------------------------- HOOKS */
-static int32_t scePadReadState_hook(int32_t handle, OrbisPadData *data)
+static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     int32_t ret = HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
     ensure_input();
@@ -263,7 +309,7 @@ static int32_t scePadReadState_hook(int32_t handle, OrbisPadData *data)
     return ret;
 }
 
-static int32_t scePadRead_hook(int32_t handle, OrbisPadData *data, int32_t count)
+static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     int32_t ret = HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
     ensure_input();
