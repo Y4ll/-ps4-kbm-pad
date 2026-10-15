@@ -1,0 +1,61 @@
+# kbm_pad — teclado y ratón como mando (plugin GoldHEN)
+
+Plugin `.prx` para GoldHEN que engancha `scePadRead` / `scePadReadState` del juego
+y mezcla en los datos del mando las entradas de un teclado y un ratón USB.
+
+> **Estado: sin probar en consola.** Compila contra los headers de OpenOrbis, pero
+> no se ha enlazado ni ejecutado en una PS4. Ver "Cosas por verificar".
+
+## Controles
+
+| Entrada | DualShock 4 |
+|---|---|
+| W A S D | Stick izquierdo |
+| Movimiento del ratón | Stick derecho |
+| Clic izquierdo / derecho | R2 / L2 |
+| Espacio / E / Q / R | Cruz / Círculo / Cuadrado / Triángulo |
+| F / G | L1 / R1 |
+| Shift / Ctrl | L3 / R3 |
+| Flechas | D-pad |
+| Enter / Tab | Options / Touchpad |
+| **F8** | Activar / pausar el plugin |
+
+Ajustes (sensibilidad, inercia, invertir Y, tecla de pausa) al inicio de `src/main.c`.
+
+## Compilar (Linux o macOS)
+
+1. Instala el [OpenOrbis PS4 Toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain)
+   **ya compilado** (release con `lib/` y `bin/`), más `clang` y `ld.lld` (LLVM 10+).
+2. ```
+   export OO_PS4_TOOLCHAIN=/ruta/al/OpenOrbis-PS4-Toolchain
+   make
+   ```
+3. Resultado: `kbm_pad.prx`.
+
+El SDK de plugins de GoldHEN (MIT) viene incluido en `sdk/`.
+
+## Instalar en la PS4
+
+1. Copia `kbm_pad.prx` a `/data/GoldHEN/plugins/`.
+2. Actívalo en `/data/GoldHEN/plugins.ini` (o el archivo de plugins de tu versión de GoldHEN):
+   ```
+   [default]
+   /data/GoldHEN/plugins/kbm_pad.prx
+   ```
+   Para un solo juego, usa su título en vez de `[default]`, por ejemplo `[CUSA00000]`.
+3. Conecta el teclado y el ratón por USB y abre el juego.
+
+En el jailbreak para 13.00–13.52 el exploit no persiste: hay que cargar GoldHEN tras cada reinicio.
+
+## Cosas por verificar
+
+- **Ratón:** `libSceMouse` no está documentada en OpenOrbis. La estructura de datos
+  (`KbmMouse`) y los bits de los botones son una suposición; si el ratón no responde
+  o va invertido, empieza por ahí.
+- **Librerías de enlace:** el `Makefile` usa `-lSceMouse` y `-lSceKeyboard`. Si tu
+  toolchain no trae esos stubs, el enlace fallará y habrá que resolverlas en tiempo
+  de ejecución con `sceKernelDlsym`.
+- **Juegos:** solo funciona con juegos que lean el mando con `scePadRead` o
+  `scePadReadState`. Algunos usan variantes (`...Ext`) que aún no están enganchadas.
+- **Logs:** el plugin escribe al klog con el prefijo `[kbm_pad]`; ahí verás si se
+  abrieron el teclado y el ratón.
