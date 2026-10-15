@@ -142,6 +142,43 @@ extern int32_t sceMouseRead(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
+#define KBM_BUILD "build-log-1"   /* marca para saber que .prx esta cargado */
+
+/* ------------------------------------------------- REGISTRO A ARCHIVO */
+/* Sin klog ni PC: el plugin escribe /data/GoldHEN/kbm_pad.log (se abre por
+ * FTP). Cada linea se abre/escribe/cierra para que no se pierda nada si el
+ * juego se cuelga. Las etiquetas asm evitan chocar con las declaraciones del
+ * header del toolchain. Flags FreeBSD: O_WRONLY=1, O_APPEND=8, O_CREAT=0x200. */
+#include <stdarg.h>
+
+#define KBM_LOG_PATH "/data/GoldHEN/kbm_pad.log"
+
+extern int32_t kbm_sys_open(const char *path, int32_t flags, int32_t mode)
+    __asm__("sceKernelOpen");
+extern int64_t kbm_sys_write(int32_t fd, const void *buf, size_t n)
+    __asm__("sceKernelWrite");
+extern int32_t kbm_sys_close(int32_t fd)
+    __asm__("sceKernelClose");
+
+static void kbm_log(const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    if (n >= (int)sizeof(buf))
+        n = (int)sizeof(buf) - 1;
+    int32_t fd = kbm_sys_open(KBM_LOG_PATH, 0x0001 | 0x0008 | 0x0200, 0666);
+    if (fd >= 0) {
+        kbm_sys_write(fd, buf, (size_t)n);
+        kbm_sys_close(fd);
+    }
+    printf("%s", buf);   /* y tambien al klog */
+}
+
 /* ------------------------------------------------- NOTIFICACIONES */
 /* Aviso en pantalla (el toast de la PS4) via libkernel, sin librerias extra.
  * Layout copiado (verificado desensamblando plugin_template.prx de GoldHEN):
@@ -185,7 +222,7 @@ static void notify(const char *msg)
     snprintf(req.icon_image_uri, sizeof(req.icon_image_uri), "%s",
              "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
-    klog("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
+    kbm_log("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
 }
 
 /* ------------------------------------------------------------ ESTADO */
@@ -220,7 +257,7 @@ static void ensure_input(void)
     sceMouseInit();
     g_mouse = sceMouseOpen(user, 0, 0, NULL);
 
-    klog("[kbm_pad] user=%d keyboard=%d mouse=%d\n", user, g_kb, g_mouse);
+    kbm_log("[kbm_pad] user=%d keyboard=%d mouse=%d\n", user, g_kb, g_mouse);
 
     /* Se ejecuta en la primera llamada al hook: si este aviso sale, el hook
      * del mando SI se esta disparando. */
@@ -230,7 +267,7 @@ static void ensure_input(void)
     notify(msg);
 
     if (g_kb < 0 && g_mouse < 0) {
-        klog("[kbm_pad] no se abrio ni teclado ni raton\n");
+        kbm_log("[kbm_pad] no se abrio ni teclado ni raton\n");
         g_failed = true;
         return;
     }
@@ -264,7 +301,7 @@ static void apply_kbm(KbmPadData *d)
     bool t = has_key(&kd, TOGGLE_KEYCODE);
     if (t && !g_toggle_down) {
         g_enabled = !g_enabled;
-        klog("[kbm_pad] %s\n", g_enabled ? "ACTIVO" : "PAUSA");
+        kbm_log("[kbm_pad] %s\n", g_enabled ? "ACTIVO" : "PAUSA");
         notify(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
     }
     g_toggle_down = t;
@@ -350,6 +387,8 @@ static void fake_pad(KbmPadData *d)
 /* ------------------------------------------------------------- HOOKS */
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
+    static bool seen;
+    if (!seen) { seen = true; kbm_log("[kbm_pad] hook scePadReadState: 1a llamada\n"); }
     int32_t ret = HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
     ensure_input();
     if (!g_ready || data == NULL)
@@ -365,6 +404,8 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
+    static bool seen;
+    if (!seen) { seen = true; kbm_log("[kbm_pad] hook scePadRead: 1a llamada\n"); }
     int32_t ret = HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
@@ -388,10 +429,13 @@ static void kbm_start(void)
     if (g_hooked)
         return;
     g_hooked = true;
-    klog("[kbm_pad] cargado\n");
+    kbm_log("[kbm_pad] cargado (%s)\n", KBM_BUILD);
     notify("kbm_pad cargado");
+    kbm_log("[kbm_pad] enganchando scePadReadState...\n");
     HOOK(scePadReadState);
+    kbm_log("[kbm_pad] enganchando scePadRead...\n");
     HOOK(scePadRead);
+    kbm_log("[kbm_pad] enganches listos\n");
 }
 
 static void kbm_stop(void)
@@ -401,7 +445,7 @@ static void kbm_stop(void)
     g_hooked = false;
     UNHOOK(scePadReadState);
     UNHOOK(scePadRead);
-    klog("[kbm_pad] descargado\n");
+    kbm_log("[kbm_pad] descargado\n");
 }
 
 /* ------------------------------------------------------ ENTRY POINTS */
@@ -415,6 +459,7 @@ __attribute__((visibility("default")))
 int plugin_load(int argc, const char *argv[])
 {
     (void)argc; (void)argv;
+    kbm_log("[kbm_pad] plugin_load llamado (%s)\n", KBM_BUILD);
     kbm_start();
     return 0;   /* 0 = cargado; otro valor hace que el loader llame a plugin_unload */
 }
@@ -431,6 +476,7 @@ __attribute__((visibility("default")))
 int module_start(size_t argc, const void *args)
 {
     (void)argc; (void)args;
+    kbm_log("[kbm_pad] module_start llamado (%s)\n", KBM_BUILD);
     kbm_start();
     return 0;
 }
