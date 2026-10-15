@@ -13,21 +13,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout create-fself
+        uses: actions/checkout@v4
+        with:
+          repository: OpenOrbis/create-fself
+          path: create-fself
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.17'
+          cache: false
+
+      - name: Build create-fself
+        working-directory: create-fself/cmd/create-fself
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+          go build -o "$GITHUB_WORKSPACE/tools/create-fself" -modfile=go-linux.mod
+          chmod +x "$GITHUB_WORKSPACE/tools/create-fself"
+
       - name: Pull OpenOrbis toolchain image
         run: docker pull openorbisofficial/toolchain:latest
 
       - name: Show toolchain info (diagnostico)
         run: |
-          libs=$(docker run --rm --user root openorbisofficial/toolchain:latest \
-            bash -c 'ls "$OO_PS4_TOOLCHAIN/lib" | grep -i -E "pad|mouse|keyboard|userservice|sysmodule|kernel|libc" | tr "\n" " "; echo; ls "$OO_PS4_TOOLCHAIN/bin/linux" | tr "\n" " "; echo; which clang-12 ld.lld-12 clang ld.lld | tr "\n" " "' 2>&1 || true)
-          echo "::notice title=Toolchain info::$(printf '%s' "$libs" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
+          info=$(docker run --rm --user root openorbisofficial/toolchain:latest bash -c '
+            echo "headers:"; ls "$OO_PS4_TOOLCHAIN/include/orbis" | grep -E "^(Pad|Keyboard|Mouse|UserService|Sysmodule|libkernel)\.h$" | tr "\n" " "; echo
+            echo "types:"; ls "$OO_PS4_TOOLCHAIN/include/orbis/_types" | grep -i -E "keyboard|pad|sysmodule" | tr "\n" " "; echo
+            echo "clang:"; clang --version | head -1' 2>&1 || true)
+          echo "::notice title=Toolchain info::$(printf '%s' "$info" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
 
       - name: Build kbm_pad.prx
         run: |
           set +e
-          docker run --rm --user root -w /workspace -v "$PWD":/workspace \
+          docker run --rm --user root -w /workspace \
+            -v "$PWD":/workspace -v "$PWD/tools":/tools:ro \
             openorbisofficial/toolchain:latest \
-            make CC=clang-12 LD=ld.lld-12 2>&1 | tee build.log
+            make FSELF=/tools/create-fself 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             errs=$(grep -n -i -E "error|undefined|cannot find|not found|No rule|\*\*\*" build.log | head -40)

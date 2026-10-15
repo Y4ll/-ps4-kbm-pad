@@ -34,6 +34,9 @@ else
   CDIR := linux
 endif
 
+# Herramienta que genera el .prx (se puede cambiar: make FSELF=/ruta/create-fself)
+FSELF ?= $(TOOLCHAIN)/bin/$(CDIR)/create-fself
+
 all: $(TARGET)
 
 $(INTDIR):
@@ -51,7 +54,7 @@ $(INTDIR)/app_%.o: src/%.c | $(INTDIR)
 
 $(TARGET): $(CRT_OBJ) $(OBJS)
 	$(LD) $(OBJS) $(CRT_OBJ) -o $(INTDIR)/kbm_pad.elf $(LDFLAGS)
-	$(TOOLCHAIN)/bin/$(CDIR)/create-fself -in=$(INTDIR)/kbm_pad.elf \
+	$(FSELF) -in=$(INTDIR)/kbm_pad.elf \
 	  -out=$(INTDIR)/kbm_pad.oelf --lib=$(TARGET) --paid 0x3800000000000011
 
 clean:
