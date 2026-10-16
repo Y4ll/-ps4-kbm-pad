@@ -18,6 +18,8 @@
 
 #include "Detour.h"
 #include "Utilities.h"
+#include "Patcher.h"
+#include "Syscall.h"
 
 /* Los macros HOOK() del SDK llaman a klog (= printf de libc, variadica). El README
  * del SDK avisa de que el registro con va_args cuelga los plugins, asi que aqui
@@ -71,6 +73,12 @@ typedef struct KbmPadData {
 
 extern int32_t scePadRead(int32_t handle, KbmPadData *data, int32_t count);
 extern int32_t scePadReadState(int32_t handle, KbmPadData *data);
+/* Variantes "Ext" de libScePad. Como gamepad_helper (oficial), los hooks NO usan el
+ * trampolin del Detour (HOOK_CONTINUE): llaman a scePadReadExt / scePadReadStateExt,
+ * que tienen el mismo efecto que el original y evitan copiar el prologo de
+ * scePadRead (instrucciones relativas copiadas a otro sitio = cierre del juego). */
+extern int32_t scePadReadExt(int32_t handle, KbmPadData *data, int32_t count);
+extern int32_t scePadReadStateExt(int32_t handle, KbmPadData *data);
 
 /* ------------------------------------------------ TECLADO (sin header) */
 /* Las releases de OpenOrbis no traen orbis/Keyboard.h; estos tipos son los
@@ -151,7 +159,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-trace-1"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-ext-1"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -346,13 +354,121 @@ static void notify(const char *msg)
     lb_s("[kbm_pad] aviso \""); lb_s(msg); lb_s("\" -> "); lb_d(r); lb_s("\n"); lb_flush();
 }
 
-#if KBM_STAGE >= 3
-/* ------------------------------------------------------------ ESTADO */
-typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
-typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
-
+#if KBM_STAGE >= 2
+/* --------------------------------------------- ENGANCHE DEL MANDO (comun) */
 HOOK_INIT(scePadReadState);
 HOOK_INIT(scePadRead);
+
+static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data);
+static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count);
+
+extern const char *kbm_sandbox_word(void) __asm__("sceKernelGetFsSandboxRandomWord");
+
+static Patcher g_patchReadExt;
+static Patcher g_patchReadStateExt;
+static bool    g_hooks_on;
+
+/* "/<palabra del sandbox>/common/lib/<name>", igual que gamepad_helper. Sin snprintf. */
+static void sys_lib_path(char *dst, size_t cap, const char *name)
+{
+    const char *w = kbm_sandbox_word();
+    dst[0] = 0;
+    kbm_cat(dst, cap, "/");
+    kbm_cat(dst, cap, w ? w : "system");
+    kbm_cat(dst, cap, "/common/lib/");
+    kbm_cat(dst, cap, name);
+}
+
+/* Agrega n bytes en hexadecimal ("b9 01 00") al final de dst. */
+static void kbm_hex(char *dst, size_t cap, const uint8_t *p, int n)
+{
+    static const char hx[] = "0123456789abcdef";
+    size_t i = 0;
+    while (dst[i] && i + 1 < cap)
+        i++;
+    for (int k = 0; k < n && i + 4 < cap; k++) {
+        dst[i++] = hx[p[k] >> 4];
+        dst[i++] = hx[p[k] & 15];
+        if (k + 1 < n)
+            dst[i++] = ' ';
+    }
+    dst[i] = 0;
+}
+
+/* Copia fiel de gamepad_helper: cargar libScePad, parchear el inicio de
+ * scePadReadExt / scePadReadStateExt y enganchar scePadRead / scePadReadState (HOOK32).
+ * Antes de tocar nada se comprueban los primeros bytes y se muestran en pantalla:
+ * si no son los esperados (mov ecx/edx, imm32) NO se parchea ni se engancha, para
+ * que el juego no se cierre y se vea por que. */
+static bool install_pad_hooks(void)
+{
+    char path[128];
+    int  id = 0;
+    sys_lib_path(path, sizeof(path), "libScePad.sprx");
+    int r = sys_dynlib_load_prx(path, &id);
+    lb_s("[kbm_pad] libScePad "); lb_s(path); lb_s(" -> "); lb_d(r);
+    lb_s(" id="); lb_d(id); lb_s("\n"); lb_flush();
+
+    const uint8_t *rd   = (const uint8_t *)(uintptr_t)scePadRead;
+    const uint8_t *rdx  = (const uint8_t *)(uintptr_t)scePadReadExt;
+    const uint8_t *st   = (const uint8_t *)(uintptr_t)scePadReadState;
+    const uint8_t *stx  = (const uint8_t *)(uintptr_t)scePadReadStateExt;
+
+    char msg[160];
+    msg[0] = 0;
+    kbm_cat(msg, sizeof(msg), KBM_NAME ": Read ");
+    kbm_hex(msg, sizeof(msg), rd, 6);
+    kbm_cat(msg, sizeof(msg), " | Ext ");
+    kbm_hex(msg, sizeof(msg), rdx, 6);
+    notify(msg);
+    msg[0] = 0;
+    kbm_cat(msg, sizeof(msg), KBM_NAME ": State ");
+    kbm_hex(msg, sizeof(msg), st, 6);
+    kbm_cat(msg, sizeof(msg), " | Ext ");
+    kbm_hex(msg, sizeof(msg), stx, 6);
+    notify(msg);
+
+    if (rd[0] == 0xE9 || st[0] == 0xE9) {
+        /* HOOK32 seguiria ese salto y engancharia scePadReadExt: recursion infinita */
+        notify(KBM_NAME ": scePadRead empieza con jmp, no se engancha");
+        return false;
+    }
+    if (rdx[0] != 0xB9 || stx[0] != 0xBA) {
+        notify(KBM_NAME ": scePadReadExt distinto al esperado, no se engancha");
+        return false;
+    }
+
+    Patcher_Construct(&g_patchReadExt);
+    Patcher_Construct(&g_patchReadStateExt);
+    static const uint8_t xor_ecx_ecx[5] = {0x31, 0xC9, 0x90, 0x90, 0x90};
+    static const uint8_t xor_edx_edx[5] = {0x31, 0xD2, 0x90, 0x90, 0x90};
+    Patcher_Install_Patch(&g_patchReadExt, (uint64_t)(uintptr_t)scePadReadExt,
+                          xor_ecx_ecx, sizeof(xor_ecx_ecx));
+    Patcher_Install_Patch(&g_patchReadStateExt, (uint64_t)(uintptr_t)scePadReadStateExt,
+                          xor_edx_edx, sizeof(xor_edx_edx));
+    L("[kbm_pad] parches Ext instalados\n");
+
+    HOOK32(scePadRead);
+    HOOK32(scePadReadState);
+    L("[kbm_pad] HOOK32 instalados\n");
+    g_hooks_on = true;
+    return true;
+}
+
+static void remove_pad_hooks(void)
+{
+    if (!g_hooks_on)
+        return;
+    g_hooks_on = false;
+    UNHOOK(scePadReadState);
+    UNHOOK(scePadRead);
+    Patcher_Destroy(&g_patchReadExt);
+    Patcher_Destroy(&g_patchReadStateExt);
+}
+#endif /* KBM_STAGE >= 2 */
+
+#if KBM_STAGE >= 3
+/* ------------------------------------------------------------ ESTADO */
 
 static bool    g_ready;
 static bool    g_failed;
@@ -388,15 +504,29 @@ static void *find_sym(int32_t handle, const char *name)
     return r == 0 ? addr : NULL;
 }
 
+/* Ruta con la palabra del sandbox primero; si falla, la ruta fija. */
+static int32_t load_sys_lib(const char *name)
+{
+    char path[128];
+    sys_lib_path(path, sizeof(path), name);
+    int32_t h = load_lib(path);
+    if (h > 0)
+        return h;
+    path[0] = 0;
+    kbm_cat(path, sizeof(path), "/system/common/lib/");
+    kbm_cat(path, sizeof(path), name);
+    return load_lib(path);
+}
+
 static bool resolve_input_libs(void)
 {
-    int32_t hk = load_lib("/system/common/lib/libSceKeyboard.sprx");
+    int32_t hk = load_sys_lib("libSceKeyboard.sprx");
     if (hk > 0) {
         p_kbInit = (int32_t (*)(void))find_sym(hk, "sceKeyboardInit");
         p_kbOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))find_sym(hk, "sceKeyboardOpen");
         p_kbRead = (int32_t (*)(int32_t, OrbisKeyboardData *))find_sym(hk, "sceKeyboardReadState");
     }
-    int32_t hm = load_lib("/system/common/lib/libSceMouse.sprx");
+    int32_t hm = load_sys_lib("libSceMouse.sprx");
     if (hm > 0) {
         p_mInit = (int32_t (*)(void))find_sym(hm, "sceMouseInit");
         p_mOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))find_sym(hm, "sceMouseOpen");
@@ -580,7 +710,7 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     static bool seen;
     if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); notify("kbm_pad: hook ReadState llamado"); }
-    int32_t ret = HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
+    int32_t ret = scePadReadStateExt(handle, data);
     ensure_input();
     if (!g_ready || data == NULL)
         return ret;
@@ -597,7 +727,7 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     static bool seen;
     if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); notify("kbm_pad: hook Read llamado"); }
-    int32_t ret = HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
+    int32_t ret = scePadReadExt(handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
         return ret;
@@ -614,21 +744,19 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 #endif /* KBM_STAGE >= 3 */
 
 #if KBM_STAGE == 2
-/* Etapa 2: enganches que solo llaman al original (prueba del Detour). */
-typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
-typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
-
-HOOK_INIT(scePadReadState);
-HOOK_INIT(scePadRead);
-
+/* Etapa 2: enganches que solo reenvian a las funciones Ext (como gamepad_helper). */
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
-    return HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
+    static bool seen;
+    if (!seen) { seen = true; notify(KBM_NAME ": hook ReadState llamado"); }
+    return scePadReadStateExt(handle, data);
 }
 
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
-    return HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
+    static bool seen;
+    if (!seen) { seen = true; notify(KBM_NAME ": hook Read llamado"); }
+    return scePadReadExt(handle, data, count);
 }
 #endif /* KBM_STAGE == 2 */
 
@@ -644,12 +772,8 @@ static void kbm_start(void)
     lb_s(", etapa "); lb_d(KBM_STAGE); lb_s(")\n"); lb_flush();
     notify(KBM_NAME " cargado");
 #if KBM_STAGE >= 2
-    L("[kbm_pad] enganchando scePadReadState...\n");
-    HOOK32(scePadReadState);
-    L("[kbm_pad] enganchando scePadRead...\n");
-    HOOK32(scePadRead);
-    L("[kbm_pad] enganches listos\n");
-    notify(KBM_NAME ": enganches listos");
+    if (install_pad_hooks())
+        notify(KBM_NAME ": enganches listos");
 #endif
 }
 
@@ -659,8 +783,7 @@ static void kbm_stop(void)
         return;
     g_hooked = false;
 #if KBM_STAGE >= 2
-    UNHOOK(scePadReadState);
-    UNHOOK(scePadRead);
+    remove_pad_hooks();
 #endif
     lb_s("["); lb_s(KBM_NAME); lb_s("] descargado\n"); lb_flush();
 }
