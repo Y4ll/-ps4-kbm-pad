@@ -887,6 +887,12 @@ static const char k_ini_default[] =
     "# flecha_arriba, flecha_abajo, flecha_izq, flecha_der, ninguna.\n"
     "# Un boton puede tener varias teclas separadas por coma (ejemplo: r3=ctrl,v).\n"
     "\n"
+    "# --- Estado ---\n"
+    "# activo=1 enciende el plugin y activo=0 lo pausa (teclado y raton dejan de ser mando).\n"
+    "# La app kbm_manager cambia esta linea; el plugin vigila el archivo y aplica los\n"
+    "# cambios solo, sin pulsar F6. El estado real queda en kbm_pad.status.\n"
+    "activo=1\n"
+    "\n"
     "# --- Camara (raton) ---\n"
     "# sens_x / sens_y: sube para girar mas rapido. suavizado: 0 = directo, 0.8 = muy suave.\n"
     "# zona_muerta: la del stick del juego (sube si la camara no arranca con movimientos lentos).\n"
@@ -1076,7 +1082,8 @@ static void ini_bad(const char *key, const char *val)
 
 static void ini_apply(const char *key, const char *val)
 {
-    if (kbm_streq(key, "sens_x"))      { g_sens_x = kbm_clampf(parse_float(val), 0.1f, 60.0f); return; }
+    if (kbm_streq(key, "activo"))      { g_enabled = parse_float(val) != 0.0f; return; }
+    if (kbm_streq(key, "sens_x"))     { g_sens_x = kbm_clampf(parse_float(val), 0.1f, 60.0f); return; }
     if (kbm_streq(key, "sens_y"))      { g_sens_y = kbm_clampf(parse_float(val), 0.1f, 60.0f); return; }
     if (kbm_streq(key, "suavizado"))   { g_smooth = kbm_clampf(parse_float(val), 0.0f, 0.90f); return; }
     if (kbm_streq(key, "zona_muerta")) { g_deadzone = kbm_clampf(parse_float(val), 0.0f, 0.60f); return; }
@@ -1235,10 +1242,87 @@ static void open_devices(bool first)
     notify(msg);
 }
 
+/* ---------------------------------------------- CONTROL DESDE LA APP
+ * La app (kbm_manager) escribe "activo=0/1" y demas ajustes en kbm_pad.ini; aqui se
+ * vigila el archivo (cada ~2 s) y se recarga solo cuando cambia. El estado real
+ * (activo, modo conducir, dispositivos, sensibilidad) se publica en kbm_pad.status
+ * para que la app lo muestre. */
+#define KBM_STATUS_PATH "/data/GoldHEN/kbm_pad.status"
+
+static uint32_t g_ini_hash;
+static bool     g_ini_hash_ok;
+
+/* Huella (FNV-1a) del contenido del ini; 0 si no se puede leer. */
+static uint32_t ini_fingerprint(void)
+{
+    int32_t fd = kbm_sys_open(KBM_INI_PATH, 0, 0);
+    if (fd < 0)
+        return 0;
+    uint32_t h = 2166136261u;
+    uint8_t buf[256];
+    for (;;) {
+        int64_t r = kbm_sys_read(fd, buf, sizeof(buf));
+        if (r <= 0)
+            break;
+        for (int64_t i = 0; i < r; i++)
+            h = (h ^ buf[i]) * 16777619u;
+    }
+    kbm_sys_close(fd);
+    return h ? h : 1;
+}
+
+static void ini_mark_seen(void)
+{
+    g_ini_hash = ini_fingerprint();
+    g_ini_hash_ok = true;
+}
+
+static void status_publish(void)
+{
+    static uint32_t last_sig = 0xFFFFFFFFu;
+    uint32_t sig = (g_enabled ? 1u : 0u) | (g_drive ? 2u : 0u) |
+                   (g_kb >= 0 ? 4u : 0u) | (g_mouse >= 0 ? 8u : 0u) |
+                   ((uint32_t)(g_sens_x * 10.0f) << 8);
+    if (sig == last_sig)
+        return;
+    last_sig = sig;
+    char s[160];
+    s[0] = 0;
+    kbm_cat(s, sizeof(s), "version=");   kbm_cat_u(s, sizeof(s), KBM_VERSION);
+    kbm_cat(s, sizeof(s), "\nactivo=");   kbm_cat_u(s, sizeof(s), g_enabled ? 1 : 0);
+    kbm_cat(s, sizeof(s), "\nconducir="); kbm_cat_u(s, sizeof(s), g_drive ? 1 : 0);
+    kbm_cat(s, sizeof(s), "\nteclado=");  kbm_cat_u(s, sizeof(s), g_kb >= 0 ? 1 : 0);
+    kbm_cat(s, sizeof(s), "\nraton=");    kbm_cat_u(s, sizeof(s), g_mouse >= 0 ? 1 : 0);
+    kbm_cat(s, sizeof(s), "\nsens=");     cat_f1(s, sizeof(s), g_sens_x);
+    kbm_cat(s, sizeof(s), "\n");
+    upd_write_small(KBM_STATUS_PATH, s, kbm_len(s));
+}
+
+static void external_poll(void)
+{
+    static int tick;
+    if (++tick < 120)
+        return;
+    tick = 0;
+    uint32_t h = ini_fingerprint();
+    if (g_ini_hash_ok && h != 0 && h != g_ini_hash) {
+        bool was = g_enabled;
+        config_load();
+        L("[kbm_pad] config: kbm_pad.ini cambio, recargado\n");
+        if (g_enabled != was)
+            notify(g_enabled ? "kbm_pad ACTIVO (teclado y raton = mando)"
+                             : "kbm_pad PAUSA (mando normal)");
+    }
+    g_ini_hash = h;
+    g_ini_hash_ok = true;
+    status_publish();
+}
+
 /* Deteccion automatica: si falta algun dispositivo se reintenta abrirlo cada ~2 s,
  * asi se puede conectar con el juego ya abierto. */
 static void poll_devices(void)
 {
+    external_poll();
     static int tick;
     if (g_kb >= 0 && g_mouse >= 0)
         return;
@@ -1258,6 +1342,7 @@ static void ensure_input(void)
     note("kbm_pad: paso 2 (usuario OK)");
 
     config_load();
+    ini_mark_seen();
 
     /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
      * resuelven por ruta y dlsym. */
@@ -1363,6 +1448,7 @@ static void apply_kbm(KbmPadData *d)
     }
     if (edge(key_down(&kd, g_k_reload), &e_reload)) {
         config_load();
+        ini_mark_seen();
         notify("kbm_pad: configuracion recargada");
     }
 

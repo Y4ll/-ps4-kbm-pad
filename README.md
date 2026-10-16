@@ -22,6 +22,26 @@ y mezcla en los datos del mando las entradas de un teclado y un ratón USB.
 
 Ajustes (sensibilidad, inercia, invertir Y, tecla de pausa) al inicio de `src/main.c`.
 
+## Control desde una app (kbm_manager)
+
+El plugin vigila `/data/GoldHEN/kbm_pad.ini` cada ~2 s y recarga solo cuando cambia
+(F6 sigue funcionando). Para activar o pausar desde una app basta con escribir en ese
+archivo la línea `activo=1` (encendido) o `activo=0` (pausa; el mando funciona normal).
+Cualquier otro ajuste del `.ini` (sensibilidad, teclas, botones) se aplica igual.
+
+El plugin publica su estado en `/data/GoldHEN/kbm_pad.status`, por ejemplo:
+
+```
+version=6
+activo=1
+conducir=0
+teclado=1
+raton=1
+sens=6.0
+```
+
+F8 sigue pausando/activando dentro del juego; el estado real siempre está en `.status`.
+
 ## Compilar (Linux o macOS)
 
 1. Instala el [OpenOrbis PS4 Toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain)
