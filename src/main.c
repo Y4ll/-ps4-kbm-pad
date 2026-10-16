@@ -115,7 +115,7 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 #define MOUSE_DECAY     0.55f   /* 0 = sin inercia, 0.9 = mucha inercia */
 #define INVERT_MOUSE_Y  0       /* 1 = invertir eje Y del raton         */
 #define TOGGLE_KEYCODE  ORBIS_KEYBOARD_KEY_F8   /* activar / pausar     */
-#define AIM_TOGGLE      1       /* 1 = clic derecho alterna la mira (L2); 0 = mantener */
+#define AIM_TOGGLE      0       /* 1 = clic derecho alterna la mira (L2); 0 = mantener */
 
 /* Codigos USB HID (los mismos que usa OrbisKeyboardData.keycodes) */
 #define K_A 4
@@ -643,6 +643,25 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
+            if (mb.m.buttons != g_mbtn) {   /* diagnostico: aviso en cada cambio de botones */
+                static int g_btn_notices;
+                if (g_btn_notices < 16) {
+                    g_btn_notices++;
+                    char m[64];
+                    m[0] = 0;
+                    kbm_cat(m, sizeof(m), "raton botones=");
+                    lb_s(""); /* mantiene el constructor de linea vacio */
+                    char hx[12];
+                    static const char h[] = "0123456789abcdef";
+                    uint32_t v = mb.m.buttons;
+                    int k = 0;
+                    for (int sh = 28; sh >= 0; sh -= 4)
+                        hx[k++] = h[(v >> sh) & 15];
+                    hx[k] = 0;
+                    kbm_cat(m, sizeof(m), hx);
+                    notify(m);
+                }
+            }
             g_mbtn = mb.m.buttons;
         }
     }
