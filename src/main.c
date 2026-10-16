@@ -310,6 +310,22 @@ static void kbm_cat(char *dst, size_t cap, const char *src)
     dst[i] = 0;
 }
 
+static void kbm_cat_u(char *dst, size_t cap, uint32_t v)
+{
+    char t[12], o[12];
+    int n = 0, k = 0;
+    if (v == 0)
+        t[n++] = '0';
+    while (v) {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    while (n)
+        o[k++] = t[--n];
+    o[k] = 0;
+    kbm_cat(dst, cap, o);
+}
+
 /* ------------------------------------------------- NOTIFICACIONES */
 /* Aviso en pantalla (el toast de la PS4) via libkernel, sin librerias extra.
  * Layout copiado (verificado desensamblando plugin_template.prx de GoldHEN):
@@ -354,6 +370,13 @@ static void notify(const char *msg)
              "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
     lb_s("[kbm_pad] aviso \""); lb_s(msg); lb_s("\" -> "); lb_d(r); lb_s("\n"); lb_flush();
+}
+
+/* Mensajes de seguimiento: solo al log, SIN aviso en pantalla (solo se muestran 2 avisos:
+ * el de arranque y el de actualizacion). */
+static void note(const char *msg)
+{
+    lb_s("[kbm_pad] "); lb_s(msg); lb_s("\n"); lb_flush();
 }
 
 #if KBM_STAGE >= 2
@@ -402,7 +425,7 @@ static void kbm_hex(char *dst, size_t cap, const uint8_t *p, int n)
  * Antes de tocar nada se comprueban los primeros bytes y se muestran en pantalla:
  * si no son los esperados (mov ecx/edx, imm32) NO se parchea ni se engancha, para
  * que el juego no se cierre y se vea por que. */
-static bool install_pad_hooks(void)
+static int install_pad_hooks(void)
 {
     char path[128];
     int  id = 0;
@@ -422,22 +445,22 @@ static bool install_pad_hooks(void)
     kbm_hex(msg, sizeof(msg), rd, 6);
     kbm_cat(msg, sizeof(msg), " | Ext ");
     kbm_hex(msg, sizeof(msg), rdx, 6);
-    notify(msg);
+    note(msg);
     msg[0] = 0;
     kbm_cat(msg, sizeof(msg), KBM_NAME ": State ");
     kbm_hex(msg, sizeof(msg), st, 6);
     kbm_cat(msg, sizeof(msg), " | Ext ");
     kbm_hex(msg, sizeof(msg), stx, 6);
-    notify(msg);
+    note(msg);
 
     if (rd[0] == 0xE9 || st[0] == 0xE9) {
         /* HOOK32 seguiria ese salto y engancharia scePadReadExt: recursion infinita */
-        notify(KBM_NAME ": scePadRead empieza con jmp, no se engancha");
-        return false;
+        note(KBM_NAME ": scePadRead empieza con jmp, no se engancha");
+        return 1;
     }
     if (rdx[0] != 0xB9 || stx[0] != 0xBA) {
-        notify(KBM_NAME ": scePadReadExt distinto al esperado, no se engancha");
-        return false;
+        note(KBM_NAME ": scePadReadExt distinto al esperado, no se engancha");
+        return 2;
     }
 
     Patcher_Construct(&g_patchReadExt);
@@ -454,7 +477,7 @@ static bool install_pad_hooks(void)
     HOOK32(scePadReadState);
     L("[kbm_pad] HOOK32 instalados\n");
     g_hooks_on = true;
-    return true;
+    return 0;
 }
 
 static void remove_pad_hooks(void)
@@ -601,22 +624,6 @@ static void *upd_sym(int32_t h, const char *name)
     if (h > 0 && kbm_dlsym(h, name, &a) == 0)
         return a;
     return NULL;
-}
-
-static void kbm_cat_u(char *dst, size_t cap, uint32_t v)
-{
-    char t[12], o[12];
-    int n = 0, k = 0;
-    if (v == 0)
-        t[n++] = '0';
-    while (v) {
-        t[n++] = (char)('0' + v % 10);
-        v /= 10;
-    }
-    while (n)
-        o[k++] = t[--n];
-    o[k] = 0;
-    kbm_cat(dst, cap, o);
 }
 
 static bool upd_exists(const char *path)
@@ -803,7 +810,7 @@ static void upd_run(void)
     if (tries >= 2) {
         upd_write_small(KBM_UPD_FAILED, "1", 1);
         kbm_sys_unlink(KBM_UPD_LOCK);
-        notify("kbm_pad: auto-actualizacion desactivada tras un fallo");
+        note("kbm_pad: auto-actualizacion desactivada tras un fallo");
         return;
     }
     char t = (char)('0' + tries + 1);
@@ -831,25 +838,25 @@ static void ensure_input(void)
     if (g_ready || g_failed)
         return;
 
-    notify("kbm_pad: paso 1 (iniciando entrada)");
+    note("kbm_pad: paso 1 (iniciando entrada)");
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
-    notify("kbm_pad: paso 2 (usuario OK)");
+    note("kbm_pad: paso 2 (usuario OK)");
 
     /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
      * resuelven por ruta y dlsym. */
     sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
     sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
-    notify("kbm_pad: paso 3 (sysmodule OK)");
+    note("kbm_pad: paso 3 (sysmodule OK)");
 
     if (!resolve_input_libs()) {
         L("[kbm_pad] no se pudo resolver teclado ni raton\n");
-        notify("kbm_pad: no se pudo cargar teclado/raton");
+        note("kbm_pad: no se pudo cargar teclado/raton");
         g_failed = true;
         return;
     }
 
-    notify("kbm_pad: paso 4 (librerias resueltas)");
+    note("kbm_pad: paso 4 (librerias resueltas)");
     if (p_kbInit && p_kbOpen) {
         p_kbInit();
         g_kb = p_kbOpen(user, 0, 0, NULL);
@@ -870,7 +877,7 @@ static void ensure_input(void)
     kbm_cat(msg, sizeof(msg), g_kb >= 0 ? "OK" : "FALLO");
     kbm_cat(msg, sizeof(msg), ", raton=");
     kbm_cat(msg, sizeof(msg), g_mouse >= 0 ? "OK" : "FALLO");
-    notify(msg);
+    note(msg);
 
     if (g_kb < 0 && g_mouse < 0) {
         L("[kbm_pad] no se abrio ni teclado ni raton\n");
@@ -921,7 +928,7 @@ static void apply_kbm(KbmPadData *d)
     if (t && !g_toggle_down) {
         g_enabled = !g_enabled;
         L(g_enabled ? "[kbm_pad] ACTIVO\n" : "[kbm_pad] PAUSA\n");
-        notify(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
+        note(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
     }
     g_toggle_down = t;
 
@@ -961,7 +968,7 @@ static void apply_kbm(KbmPadData *d)
                         hx[k++] = h[(v >> sh) & 15];
                     hx[k] = 0;
                     kbm_cat(m, sizeof(m), hx);
-                    notify(m);
+                    note(m);
                 }
             }
             g_mbtn = mb.m.buttons;
@@ -975,7 +982,7 @@ static void apply_kbm(KbmPadData *d)
                 kbm_cat(m, sizeof(m), "raton: ");
                 kbm_cat_u(m, sizeof(m), (uint32_t)drained);
                 kbm_cat(m, sizeof(m), " muestras en una lectura");
-                notify(m);
+                note(m);
             }
         }
     }
@@ -1064,7 +1071,7 @@ static void fake_pad(KbmPadData *d)
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     static bool seen;
-    if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); notify("kbm_pad: hook ReadState llamado"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); note("kbm_pad: hook ReadState llamado"); }
     int32_t ret = scePadReadStateExt(handle, data);
     ensure_input();
     if (!g_ready || data == NULL)
@@ -1081,7 +1088,7 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     static bool seen;
-    if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); notify("kbm_pad: hook Read llamado"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); note("kbm_pad: hook Read llamado"); }
     int32_t ret = scePadReadExt(handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
@@ -1103,14 +1110,14 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     static bool seen;
-    if (!seen) { seen = true; notify(KBM_NAME ": hook ReadState llamado"); }
+    if (!seen) { seen = true; note(KBM_NAME ": hook ReadState llamado"); }
     return scePadReadStateExt(handle, data);
 }
 
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     static bool seen;
-    if (!seen) { seen = true; notify(KBM_NAME ": hook Read llamado"); }
+    if (!seen) { seen = true; note(KBM_NAME ": hook Read llamado"); }
     return scePadReadExt(handle, data, count);
 }
 #endif /* KBM_STAGE == 2 */
@@ -1125,21 +1132,28 @@ static void kbm_start(void)
     g_hooked = true;
     lb_s("["); lb_s(KBM_NAME); lb_s("] cargado ("); lb_s(kbm_relro_anchor[0]);
     lb_s(", etapa "); lb_d(KBM_STAGE); lb_s(")\n"); lb_flush();
-#if KBM_STAGE >= 3
     {
-        char hello[48];
+        /* UN solo aviso de arranque con el resultado. */
+        char hello[64];
+        int err = 0;
+#if KBM_STAGE >= 2
+        err = install_pad_hooks();
+#endif
         hello[0] = 0;
-        kbm_cat(hello, sizeof(hello), KBM_NAME " cargado v");
+        kbm_cat(hello, sizeof(hello), KBM_NAME);
+#if KBM_STAGE >= 3
+        kbm_cat(hello, sizeof(hello), " v");
         kbm_cat_u(hello, sizeof(hello), KBM_VERSION);
+#endif
+        if (err == 0) {
+            kbm_cat(hello, sizeof(hello), " listo");
+        } else {
+            kbm_cat(hello, sizeof(hello), ": error al enganchar (");
+            kbm_cat_u(hello, sizeof(hello), (uint32_t)err);
+            kbm_cat(hello, sizeof(hello), ")");
+        }
         notify(hello);
     }
-#else
-    notify(KBM_NAME " cargado");
-#endif
-#if KBM_STAGE >= 2
-    if (install_pad_hooks())
-        notify(KBM_NAME ": enganches listos");
-#endif
 #if KBM_STAGE >= 3
     start_update_thread();
 #endif
