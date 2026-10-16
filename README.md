@@ -27,7 +27,9 @@ y mezcla en los datos del mando las entradas de un teclado y un ratón USB.
 | Shift / Ctrl | L3 / R3 |
 | Flechas | D-pad |
 | Enter / Tab | Options / Touchpad |
-| **F8** | Activar / pausar el plugin |
+| **F7** | Modo conducir (W acelera, S frena, A/D volante) |
+| **F8 / F9** | Bajar / subir la velocidad de la cámara (sensibilidad) |
+| **F10** | Activar / pausar el plugin |
 
 Ajustes (sensibilidad, inercia, invertir Y, tecla de pausa) al inicio de `src/main.c`.
 
@@ -49,7 +51,7 @@ raton=1
 sens=6.0
 ```
 
-F8 sigue pausando/activando dentro del juego; el estado real siempre está en `.status`.
+F10 pausa/activa dentro del juego; el estado real siempre está en `.status`.
 
 ## Compilar (Linux o macOS)
 

@@ -115,7 +115,7 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 #define MOUSE_DECAY     0.40f   /* 0 = sin inercia, 0.9 = mucha inercia */
 #define MOUSE_DEADZONE  0.15f   /* zona muerta del stick del juego que se salta el raton */
 #define INVERT_MOUSE_Y  0       /* 1 = invertir eje Y del raton         */
-#define TOGGLE_KEYCODE  ORBIS_KEYBOARD_KEY_F8   /* activar / pausar     */
+#define TOGGLE_KEYCODE  67   /* F10: activar / pausar (F8/F9 = velocidad) */
 #define AIM_TOGGLE      0       /* 1 = clic derecho alterna la mira (L2); 0 = mantener */
 
 /* Codigos USB HID (los mismos que usa OrbisKeyboardData.keycodes) */
@@ -906,10 +906,12 @@ static const char k_ini_default[] =
     "alternar_mira=0\n"
     "\n"
     "# --- Teclas de control ---\n"
-    "tecla_pausa=f8\n"
+    "# En el juego: F7 = modo conducir, F8 / F9 = bajar / subir la velocidad de la camara,\n"
+    "# F10 = pausar o activar, F6 = recargar este archivo.\n"
+    "tecla_pausa=f10\n"
     "tecla_conducir=f7\n"
-    "tecla_sens_menos=f9\n"
-    "tecla_sens_mas=f10\n"
+    "tecla_sens_menos=f8\n"
+    "tecla_sens_mas=f9\n"
     "tecla_recargar=f6\n"
     "\n"
     "# --- Movimiento (stick izquierdo) ---\n"
@@ -1057,10 +1059,10 @@ static void config_defaults(void)
     g_mouse_map[0] = KBM_PAD_BUTTON_R2;
     g_mouse_map[1] = KBM_PAD_BUTTON_L2;
     g_mouse_map[2] = KBM_PAD_BUTTON_R3;
-    g_k_pause = TOGGLE_KEYCODE;   /* F8 */
+    g_k_pause = TOGGLE_KEYCODE;   /* F10 */
     g_k_drive = 64;               /* F7 */
-    g_k_sens_dn = 66;             /* F9 */
-    g_k_sens_up = 67;             /* F10 */
+    g_k_sens_dn = 65;             /* F8 */
+    g_k_sens_up = 66;             /* F9 */
     g_k_reload = 63;              /* F6 */
     g_k_fwd = K_W;
     g_k_back = K_S;
@@ -1201,6 +1203,13 @@ static void config_load(void)
         for (char *q = key; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q + 32);
         for (char *q = val; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q + 32);
         ini_apply(key, val);
+    }
+    /* Migracion: un .ini antiguo trae F8 = pausa, F9 = sens- y F10 = sens+. Si sigue asi
+     * (sin tocar), se pasa al diseno nuevo: F8/F9 = velocidad, F10 = pausa. */
+    if (g_k_pause == 65 && g_k_sens_dn == 66 && g_k_sens_up == 67) {
+        g_k_pause = 67;
+        g_k_sens_dn = 65;
+        g_k_sens_up = 66;
     }
     L("[kbm_pad] config: kbm_pad.ini cargado\n");
 }
