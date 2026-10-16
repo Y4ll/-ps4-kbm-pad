@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,6 +61,21 @@ jobs:
           fi
           exit $rc
 
+      - name: Inspect ELFs (diagnostico)
+        if: always()
+        run: |
+          enc() { sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g'; }
+          for e in kbm_pad kbm_probe_a; do
+            out=$(bash tools/inspect_elf.sh "build/$e.elf" 2>&1 | head -c 12000)
+            echo "::notice title=ELF $e::$(printf '%s' "$out" | enc)"
+          done
+          und() { readelf --dyn-syms -W "$1" 2>/dev/null | awk '$7=="UND"{print $8}' | sort -u; }
+          und build/kbm_pad.elf > /tmp/pad.und
+          und build/kbm_probe_a.elf > /tmp/a.und
+          only_pad=$(comm -23 /tmp/pad.und /tmp/a.und | tr '\n' ' ')
+          only_a=$(comm -13 /tmp/pad.und /tmp/a.und | tr '\n' ' ')
+          echo "::notice title=Imports distintos::solo en kbm_pad: $only_pad || solo en probe_a: $only_a"
+
       - name: Check output
         run: |
           ls -l kbm_pad.prx
@@ -73,6 +90,16 @@ jobs:
             [ "$in_prx" = si ] || echo "::warning title=Simbolo no visible en el .prx::$s"
           done
           [ -z "$missing" ] || { echo "::error title=Falta simbolo exportado::revisa visibilidad/linker"; exit 1; }
+
+      - name: Publish release (latest)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest kbm_pad.prx kbm_probe.prx kbm_probe_a.prx kbm_probe_b.prx \
+            --title "Ultima compilacion" --target "$GITHUB_SHA" \
+            --notes "Archivos .prx directos (sin zip). Commit: $GITHUB_SHA"
 
       - name: Upload kbm_pad.prx
         uses: actions/upload-artifact@v4
