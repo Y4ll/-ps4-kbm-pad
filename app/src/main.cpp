@@ -2,6 +2,7 @@
 // Base de pantalla/mando/HTTPS tomada de McStore.
 #include "platform.h"
 #include "font.h"
+#include "icon_small.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,7 +53,7 @@ static void text(int x, int y, const char *s, int scale, uint32_t col) {
 
 static const uint32_t C_BG = RGB(18, 22, 32), C_PANEL = RGB(30, 36, 52), C_TXT = RGB(235, 238, 245),
                       C_DIM = RGB(150, 158, 175), C_OK = RGB(90, 210, 120), C_BAD = RGB(235, 90, 90),
-                      C_WARN = RGB(240, 190, 80), C_ACC = RGB(90, 150, 255);
+                      C_WARN = RGB(240, 190, 80), C_ACC = RGB(110, 160, 255);
 
 // ---------------- archivos ----------------
 static char *read_file(const char *path, long *len) {
@@ -325,53 +326,255 @@ static void uninstall_plugin() {
 }
 
 // ---------------- pantalla ----------------
-static void yesno(int x, int y, const char *label, int v, const char *yes, const char *no) {
-    text(x, y, label, 2, C_DIM);
-    text(x + 420, y, v < 0 ? "?" : (v ? yes : no), 2, v < 0 ? C_DIM : (v ? C_OK : C_BAD));
+// Dibujo por software con bordes suavizados (sin libm: raiz cuadrada propia).
+static float fsq(float v) {
+    if (v <= 0.0f) return 0.0f;
+    union { float f; uint32_t i; } u;
+    u.f = v;
+    u.i = 0x1fbd1df5u + (u.i >> 1);          // aproximacion inicial de sqrt
+    float x = u.f;
+    x = 0.5f * (x + v / x);
+    x = 0.5f * (x + v / x);
+    x = 0.5f * (x + v / x);
+    return x;
+}
+static inline float fab(float v) { return v < 0 ? -v : v; }
+static inline float fcl(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+static inline void blend_px(int x, int y, uint32_t c, int a) {
+    if (a <= 0 || x < 0 || y < 0 || x >= SCREEN_W || y >= SCREEN_H) return;
+    uint32_t *p = FB + (size_t)y * SCREEN_W + x;
+    if (a >= 255) { *p = c; return; }
+    uint32_t d = *p;
+    int r = (((c >> 16) & 255) * a + ((d >> 16) & 255) * (255 - a)) / 255;
+    int g = (((c >> 8) & 255) * a + ((d >> 8) & 255) * (255 - a)) / 255;
+    int b = ((c & 255) * a + (d & 255) * (255 - a)) / 255;
+    *p = RGB(r, g, b);
+}
+static void hspan(int x0, int x1, int y, uint32_t c, int a) {   // [x0, x1)
+    if (y < 0 || y >= SCREEN_H) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > SCREEN_W) x1 = SCREEN_W;
+    if (x0 >= x1) return;
+    if (a >= 255) { uint32_t *row = FB + (size_t)y * SCREEN_W; for (int x = x0; x < x1; x++) row[x] = c; return; }
+    for (int x = x0; x < x1; x++) blend_px(x, y, c, a);
+}
+// distancia con signo al rectangulo redondeado (negativa dentro)
+static float sdf_rr(float px, float py, float x, float y, float w, float h, float r) {
+    float qx = fab(px - (x + w * 0.5f)) - (w * 0.5f - r);
+    float qy = fab(py - (y + h * 0.5f)) - (h * 0.5f - r);
+    float ax = qx > 0 ? qx : 0, ay = qy > 0 ? qy : 0;
+    float m = qx > qy ? qx : qy;
+    return fsq(ax * ax + ay * ay) + (m < 0 ? m : 0) - r;
+}
+static void rrect(int x, int y, int w, int h, int r, uint32_t c, int alpha = 255) {
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    for (int yy = y; yy < y + h; yy++) {
+        if (yy < y + r || yy >= y + h - r) {
+            hspan(x + r, x + w - r, yy, c, alpha);
+            for (int k = 0; k < r; k++) {
+                int xl = x + k, xr = x + w - 1 - k;
+                float cl = fcl(0.5f - sdf_rr(xl + 0.5f, yy + 0.5f, (float)x, (float)y, (float)w, (float)h, (float)r));
+                blend_px(xl, yy, c, (int)(alpha * cl));
+                blend_px(xr, yy, c, (int)(alpha * cl));
+            }
+        } else hspan(x, x + w, yy, c, alpha);
+    }
+}
+// solo el borde (para resplandor y contornos)
+static void rframe(int x, int y, int w, int h, int r, int th, uint32_t c, int alpha) {
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    for (int yy = y; yy < y + h; yy++) {
+        bool band = (yy < y + r + th) || (yy >= y + h - r - th);
+        for (int xx = x; xx < x + w; xx++) {
+            if (!band && xx >= x + th + 1 && xx < x + w - th - 1) { xx = x + w - th - 2; continue; }
+            float d = sdf_rr(xx + 0.5f, yy + 0.5f, (float)x, (float)y, (float)w, (float)h, (float)r);
+            float cv = fcl(0.5f - d) * fcl(d + th + 0.5f);
+            blend_px(xx, yy, c, (int)(alpha * cv));
+        }
+    }
+}
+static void disc(int cx, int cy, int r, uint32_t c, int alpha = 255) { rrect(cx - r, cy - r, r * 2, r * 2, r, c, alpha); }
+static void ring(int cx, int cy, int r, int th, uint32_t c) {
+    for (int yy = cy - r - 1; yy <= cy + r + 1; yy++)
+        for (int xx = cx - r - 1; xx <= cx + r + 1; xx++) {
+            float d = fsq((xx + 0.5f - cx) * (xx + 0.5f - cx) + (yy + 0.5f - cy) * (yy + 0.5f - cy));
+            float cv = fcl(r - d + 0.5f) * fcl(d - (r - th) + 0.5f);
+            blend_px(xx, yy, c, (int)(255 * cv));
+        }
+}
+static void line(int x0, int y0, int x1, int y1, int th, uint32_t c) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int n = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+    if (n == 0) n = 1;
+    for (int i = 0; i <= n; i++) disc(x0 + dx * i / n, y0 + dy * i / n, th / 2 > 0 ? th / 2 : 1, c);
+}
+static int text_w(const char *s, int scale) { return (int)strlen(s) * 8 * scale; }
+static void text_r(int xr, int y, const char *s, int scale, uint32_t col) { text(xr - text_w(s, scale), y, s, scale, col); }
+
+// Simbolos de los botones de PlayStation: 0 = X, 1 = cuadrado, 2 = triangulo, 3 = circulo
+static void glyph(int kind, int cx, int cy, int r, bool dimmed) {
+    static const uint32_t cols[4] = {RGB(100, 150, 255), RGB(230, 120, 190), RGB(90, 210, 130), RGB(240, 100, 100)};
+    uint32_t c = dimmed ? RGB(96, 104, 126) : cols[kind];
+    ring(cx, cy, r, r / 8 + 2, c);
+    int s = r * 4 / 9, t = r / 7 + 2;
+    if (kind == 0) { line(cx - s, cy - s, cx + s, cy + s, t, c); line(cx + s, cy - s, cx - s, cy + s, t, c); }
+    else if (kind == 1) { line(cx - s, cy - s, cx + s, cy - s, t, c); line(cx + s, cy - s, cx + s, cy + s, t, c); line(cx + s, cy + s, cx - s, cy + s, t, c); line(cx - s, cy + s, cx - s, cy - s, t, c); }
+    else if (kind == 2) { int h = s + s / 6; line(cx, cy - h, cx + h, cy + s * 2 / 3, t, c); line(cx + h, cy + s * 2 / 3, cx - h, cy + s * 2 / 3, t, c); line(cx - h, cy + s * 2 / 3, cx, cy - h, t, c); }
+    else ring(cx, cy, s + 1, t, c);
+}
+
+static void keycap_label(int &x, int y, const char *key, const char *label) {
+    int kw = text_w(key, 2) + 28;
+    rrect(x, y, kw, 44, 10, RGB(60, 72, 104));
+    rframe(x, y, kw, 44, 10, 2, RGB(110, 160, 255), 255);
+    text(x + 14, y + 6, key, 2, RGB(235, 238, 245));
+    x += kw + 12;
+    text(x, y + 6, label, 2, C_DIM);
+    x += text_w(label, 2) + 40;
+}
+
+static void dot_row(int y, const char *label, uint32_t dotcol, const char *val, uint32_t valcol) {
+    disc(1128, y + 16, 10, dotcol);
+    text(1160, y, label, 2, C_DIM);
+    text_r(1790, y, val, 2, valcol);
 }
 
 static void draw_all(const char *busy) {
     FB = plat_framebuffer();
-    fill(0, 0, SCREEN_W, SCREEN_H, C_BG);
-    text(120, 70, "kbm_manager", 5, C_TXT);
-    text(120, 160, "Teclado + raton como mando (plugin kbm_pad)  v" APP_VERSION, 2, C_DIM);
-
-    fill(120, 220, 1680, 440, C_PANEL);
-    int x = 170, y = 260;
-    yesno(x, y, "Plugin instalado:", S.prx ? 1 : 0, "SI", "NO"); y += 50;
-    yesno(x, y, "En plugins.ini:", S.listed ? 1 : 0, "SI", "NO"); y += 50;
-    int act = S.activo < 0 ? 1 : S.activo;
-    yesno(x, y, "Modo teclado+raton:", S.prx ? act : -1, "ACTIVADO", "DESACTIVADO"); y += 50;
-    text(x, y, "Version instalada:", 2, C_DIM);
-    char b[64];
-    if (S.instVer > 0) snprintf(b, sizeof(b), "v%d", S.instVer); else snprintf(b, sizeof(b), "%s", S.prx ? "(se ve al abrir un juego)" : "-");
-    text(x + 420, y, b, 2, C_TXT); y += 50;
-    text(x, y, "Ultima version:", 2, C_DIM);
-    if (S.latest > 0) snprintf(b, sizeof(b), "v%d%s", S.latest, (S.instVer > 0 && S.instVer < S.latest) ? "  (hay actualizacion)" : ""); else snprintf(b, sizeof(b), "(pulsa X para consultar)");
-    text(x + 420, y, b, 2, (S.instVer > 0 && S.latest > S.instVer) ? C_WARN : C_TXT); y += 50;
-    if (S.teclado >= 0) {
-        text(x, y, "En el ultimo juego:", 2, C_DIM);
-        snprintf(b, sizeof(b), "teclado %s, raton %s", S.teclado ? "OK" : "no", S.raton ? "OK" : "no");
-        text(x + 420, y, b, 2, C_TXT);
+    // fondo: degradado y resplandor azul como el icono (se calcula una vez)
+    static uint32_t *g_bg = 0;
+    if (!g_bg) {
+        g_bg = (uint32_t *)malloc((size_t)SCREEN_W * SCREEN_H * 4);
+        if (g_bg) {
+            for (int y = 0; y < SCREEN_H; y++) {
+                float t = (float)y / SCREEN_H;
+                float br = 16 + 14 * t, bg = 22 + 18 * t, bb = 40 + 34 * t;
+                float dy = (y - 600) * 1.35f;
+                for (int x = 0; x < SCREEN_W; x++) {
+                    float dx = (float)(x - 960);
+                    float d2 = dx * dx + dy * dy;
+                    float w = 1.0f - d2 / (950.0f * 950.0f);
+                    float k = w > 0 ? w * w * 0.34f : 0.0f;
+                    g_bg[(size_t)y * SCREEN_W + x] = RGB((int)(br + (30 - br) * k), (int)(bg + (70 - bg) * k), (int)(bb + (150 - bb) * k));
+                }
+            }
+        }
     }
+    if (g_bg) memcpy(FB, g_bg, (size_t)SCREEN_W * SCREEN_H * 4);
+    else fill(0, 0, SCREEN_W, SCREEN_H, RGB(20, 27, 50));
+    const uint32_t PANEL = RGB(38, 48, 74), PANEL2 = RGB(70, 84, 116), LINE = RGB(66, 80, 118), BLUE = RGB(110, 160, 255);
+    bool on = S.prx && (S.activo < 0 ? 1 : S.activo);
 
-    if (busy) {
-        text(170, 590, busy, 2, C_ACC);
-        if (g_dlTotal > 0) {
-            fill(170, 625, 1580, 14, RGB(50, 58, 80));
-            fill(170, 625, (int)(1580L * g_dlDone / g_dlTotal), 14, C_ACC);
+    // ----- cabecera (zona segura: 96 px a los lados, 54 arriba)
+    for (int j = 0; j < 96; j++)
+        for (int i = 0; i < 96; i++) {
+            float cv = fcl(0.5f - sdf_rr(i + 0.5f, j + 0.5f, 0, 0, 96, 96, 22));
+            const unsigned char *q = &ICON96[(j * 96 + i) * 3];
+            blend_px(96 + i, 56 + j, RGB(q[0], q[1], q[2]), (int)(255 * cv));
+        }
+    rframe(96, 56, 96, 96, 22, 2, RGB(110, 160, 255), 120);
+    text(212, 58, "kbm_manager", 4, C_TXT);
+    text(214, 130, "Teclado + raton como mando para tu PS4", 2, C_DIM);
+    char vb[48];
+    snprintf(vb, sizeof(vb), "app v%s", APP_VERSION);
+    int vw = text_w(vb, 2) + 48;
+    rrect(1824 - vw, 78, vw, 52, 26, PANEL2);
+    text(1824 - vw + 24, 88, vb, 2, C_DIM);
+
+    // ----- tarjeta principal: estado y interruptor
+    const int HX = 96, HY = 188, HW = 944, HH = 424;
+    if (on) for (int i = 1; i <= 7; i++) rframe(HX - i * 2, HY - i * 2, HW + i * 4, HH + i * 4, 30 + i * 2, 3, BLUE, 46 - i * 6);
+    rrect(HX, HY, HW, HH, 30, PANEL);
+    rframe(HX, HY, HW, HH, 30, on ? 4 : 3, on ? BLUE : LINE, 255);
+    text(HX + 50, HY + 40, "TECLADO + RATON", 2, C_DIM);
+    const char *st = !S.prx ? "NO INSTALADO" : (on ? "ACTIVADO" : "DESACTIVADO");
+    uint32_t stc = !S.prx ? C_WARN : (on ? BLUE : RGB(190, 196, 210));
+    text(HX + 50, HY + 92, st, 5, stc);
+    const char *sub = !S.prx ? "Pulsa X para instalar el plugin" : (on ? "Listo: abre un juego y usa el teclado" : "En pausa: el mando funciona normal");
+    text(HX + 50, HY + 196, sub, 2, C_DIM);
+    // interruptor grande
+    {
+        int tx = HX + HW - 50 - 220, ty = HY + 36;
+        uint32_t track = !S.prx ? RGB(56, 64, 88) : (on ? BLUE : RGB(86, 96, 124));
+        rrect(tx, ty, 220, 108, 54, track);
+        int kx = on ? tx + 220 - 54 : tx + 54;
+        disc(kx, ty + 54, 44, S.prx ? RGB(235, 238, 245) : RGB(150, 158, 175));
+    }
+    // pista para el boton Cuadrado
+    glyph(1, HX + 78, HY + 280, 26, !S.prx);
+    text(HX + 124, HY + 264, S.prx ? "Activar / desactivar" : "Instala el plugin primero", 2, S.prx ? C_TXT : C_DIM);
+    hspan(HX + 50, HX + HW - 50, HY + 322, LINE, 255);
+    if (S.teclado >= 0) {
+        int cx = HX + 50;
+        for (int i = 0; i < 2; i++) {
+            int ok = i == 0 ? S.teclado : S.raton;
+            rrect(cx, HY + 340, 270, 60, 30, PANEL2);
+            disc(cx + 34, HY + 370, 11, ok ? C_OK : C_BAD);
+            text(cx + 62, HY + 354, i == 0 ? (ok ? "Teclado OK" : "Teclado no") : (ok ? "Raton OK" : "Raton no"), 2, C_TXT);
+            cx += 294;
         }
     } else {
-        text(170, 590, g_msg, 2, g_msgCol);
+        text(HX + 50, HY + 354, "Abre un juego para detectar teclado y raton", 2, C_DIM);
     }
 
-    int by = 710;
-    text(120, by, S.prx ? "[X] Actualizar / reinstalar plugin" : "[X] Descargar e instalar plugin", 3, C_TXT); by += 60;
-    text(120, by, "[Cuadrado] Activar / desactivar modo teclado+raton", 3, S.prx ? C_TXT : C_DIM); by += 60;
-    text(120, by, "[Triangulo] Desinstalar plugin", 3, S.prx ? C_TXT : C_DIM); by += 60;
-    text(120, by, "[Circulo] Salir", 3, C_TXT);
-    text(120, 960, "En el juego: F7 modo conducir  |  F9 / F10 velocidad de camara  |  F8 pausar  |  F6 recargar", 2, C_ACC);
-    text(120, 1010, "Tras instalar o cambiar, abre el juego. Si el juego ya estaba abierto, cierralo y vuelve a abrirlo.", 2, C_DIM);
+    // ----- tarjeta de estado
+    const int RX = 1064, RY = 188, RW = 760, RH = 424;
+    rrect(RX, RY, RW, RH, 30, PANEL);
+    text(RX + 50, RY + 40, "ESTADO", 2, C_DIM);
+    char b[64];
+    int ry = RY + 98;
+    dot_row(ry, "Plugin instalado", S.prx ? C_OK : C_BAD, S.prx ? "SI" : "NO", S.prx ? C_OK : C_BAD); ry += 72;
+    dot_row(ry, "En plugins.ini", S.listed ? C_OK : C_BAD, S.listed ? "SI" : "NO", S.listed ? C_OK : C_BAD); ry += 72;
+    if (S.instVer > 0) snprintf(b, sizeof(b), "v%d", S.instVer); else snprintf(b, sizeof(b), "%s", S.prx ? "al abrir juego" : "-");
+    dot_row(ry, "Version instalada", RGB(120, 130, 155), b, C_TXT); ry += 72;
+    bool newer = S.instVer > 0 && S.latest > S.instVer;
+    if (S.latest > 0) snprintf(b, sizeof(b), "v%d%s", S.latest, newer ? " (nueva)" : ""); else snprintf(b, sizeof(b), "pulsa X");
+    dot_row(ry, "Ultima version", newer ? C_WARN : RGB(120, 130, 155), b, newer ? C_WARN : C_TXT);
+
+    // ----- barra de mensajes
+    rrect(96, 640, 1728, 92, 22, PANEL);
+    uint32_t mc = busy ? C_ACC : g_msgCol;
+    rrect(96, 640, 12, 92, 6, (busy || g_msg[0]) ? mc : LINE);
+    if (busy) {
+        text(140, 656, busy, 2, C_ACC);
+        if (g_dlTotal > 0) {
+            rrect(140, 704, 1640, 12, 6, RGB(56, 66, 98));
+            int fw = (int)(1640L * g_dlDone / g_dlTotal);
+            if (fw >= 12) rrect(140, 704, fw, 12, 6, C_ACC);
+        }
+    } else {
+        text(140, 668, g_msg[0] ? g_msg : "Listo.", 2, g_msg[0] ? g_msgCol : C_DIM);
+    }
+
+    // ----- botones de accion
+    struct Btn { int kind; const char *title; const char *sub; bool enabled; };
+    Btn bt[3] = {
+        {0, S.prx ? "Actualizar" : "Instalar", "Descarga desde GitHub", true},
+        {1, on ? "Desactivar" : "Activar", "Teclado + raton", S.prx},
+        {2, "Desinstalar", "Quita el plugin", S.prx},
+    };
+    for (int i = 0; i < 3; i++) {
+        int bx = 96 + i * (560 + 24), by = 760;
+        rrect(bx, by, 560, 124, 28, bt[i].enabled ? PANEL2 : PANEL);
+        if (bt[i].enabled) rframe(bx, by, 560, 124, 28, 3, BLUE, 255);
+        glyph(bt[i].kind, bx + 76, by + 62, 36, !bt[i].enabled);
+        text(bx + 144, by + 24, bt[i].title, 3, bt[i].enabled ? C_TXT : RGB(120, 128, 150));
+        text(bx + 144, by + 80, bt[i].sub, 2, bt[i].enabled ? C_DIM : RGB(100, 108, 130));
+    }
+    text(96, 898, "Tras instalar o cambiar algo, abre el juego (si ya estaba abierto, cierralo antes).", 2, RGB(120, 128, 150));
+
+    // ----- barra inferior con las teclas del juego y Salir
+    rrect(96, 940, 1728, 76, 22, RGB(30, 38, 62));
+    int kx = 130;
+    keycap_label(kx, 956, "F7", "Conducir");
+    keycap_label(kx, 956, "F9/F10", "Velocidad");
+    keycap_label(kx, 956, "F8", "Pausar");
+    keycap_label(kx, 956, "F6", "Recargar");
+    glyph(3, 1824 - 40 - text_w("Salir", 2) - 44, 978, 22, false);
+    text_r(1824 - 40, 962, "Salir", 2, C_TXT);
 }
 
 int main() {
