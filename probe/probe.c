@@ -23,6 +23,8 @@
 #define PROBE_NAME "kbm_probe_a"
 #elif PROBE_VARIANT == 2
 #define PROBE_NAME "kbm_probe_b"
+#elif PROBE_VARIANT == 3
+#define PROBE_NAME "kbm_probe_c"
 #else
 #define PROBE_NAME "kbm_probe"
 #endif

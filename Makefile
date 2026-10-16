@@ -22,8 +22,12 @@ CFLAGS     := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
               -fno-stack-protector -c $(LOG_TYPE) -DDEBUG=0 \
               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include \
               -Isdk/include -Wall
-LDFLAGS    := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
-              --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib $(LIBS)
+LDBASE     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
+              --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib
+LDFLAGS    := $(LDBASE) $(LIBS)
+# Mismo conjunto de librerias pero con libkernel primero (como los probes que si cargan)
+LIBS_K     := -lkernel -lSceLibcInternal -lSceSysmodule -lSceUserService -lScePad
+LDFLAGS_K  := $(LDBASE) $(LIBS_K)
 
 CC := clang
 LD := ld.lld
@@ -48,7 +52,10 @@ STAGE1     := kbm_s1.prx
 STAGE2     := kbm_s2.prx
 SDK_OBJS   := $(filter $(INTDIR)/sdk_%.o,$(OBJS))
 
-all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2)
+STAGE1K    := kbm_s1k.prx
+PROBE_C    := kbm_probe_c.prx
+
+all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C)
 
 $(INTDIR):
 	@mkdir -p $(INTDIR)
@@ -117,7 +124,27 @@ $(STAGE2): $(CRT_OBJ) $(INTDIR)/stage2.o $(SDK_OBJS)
 	$(FSELF) -in=$(INTDIR)/kbm_s2.elf \
 	  -out=$(INTDIR)/kbm_s2.oelf --lib=$(STAGE2) --paid 0x3800000000000011
 
+# Prueba del orden de enlazado.
+#   kbm_s1k: main.c etapa 1 enlazado con libkernel PRIMERO.
+#   kbm_probe_c: el probe que ya funciona, pero con libSceLibcInternal PRIMERO (como kbm_pad).
+$(INTDIR)/stage1k.o: src/main.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DKBM_STAGE=1 '-DKBM_NAME="kbm_s1k"' -o $@ $<
+
+$(STAGE1K): $(CRT_OBJ) $(INTDIR)/stage1k.o $(SDK_OBJS)
+	$(LD) $(INTDIR)/stage1k.o $(SDK_OBJS) $(CRT_OBJ) -o $(INTDIR)/kbm_s1k.elf $(LDFLAGS_K)
+	$(FSELF) -in=$(INTDIR)/kbm_s1k.elf \
+	  -out=$(INTDIR)/kbm_s1k.oelf --lib=$(STAGE1K) --paid 0x3800000000000011
+
+$(INTDIR)/probe_c.o: probe/probe.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DPROBE_VARIANT=3 -o $@ $<
+
+$(PROBE_C): $(CRT_OBJ) $(INTDIR)/probe_c.o
+	$(LD) $(INTDIR)/probe_c.o $(CRT_OBJ) -o $(INTDIR)/kbm_probe_c.elf \
+	  $(LDBASE) -lSceLibcInternal -lkernel
+	$(FSELF) -in=$(INTDIR)/kbm_probe_c.elf \
+	  -out=$(INTDIR)/kbm_probe_c.oelf --lib=$(PROBE_C) --paid 0x3800000000000011
+
 clean:
-	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2)
+	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C)
 
 .PHONY: all clean
