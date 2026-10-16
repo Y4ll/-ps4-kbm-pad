@@ -44,7 +44,11 @@ PROBE_B    := kbm_probe_b.prx
 PROBE_LDFLAGS := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
                  --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib
 
-all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B)
+STAGE1     := kbm_s1.prx
+STAGE2     := kbm_s2.prx
+SDK_OBJS   := $(filter $(INTDIR)/sdk_%.o,$(OBJS))
+
+all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2)
 
 $(INTDIR):
 	@mkdir -p $(INTDIR)
@@ -95,7 +99,25 @@ $(PROBE_B): $(CRT_OBJ) $(INTDIR)/probe_b.o $(filter $(INTDIR)/sdk_%.o,$(OBJS))
 	$(FSELF) -in=$(INTDIR)/kbm_probe_b.elf \
 	  -out=$(INTDIR)/kbm_probe_b.oelf --lib=$(PROBE_B) --paid 0x3800000000000011
 
+# Etapas del plugin real (src/main.c) para diagnosticar. Mismo enlazado que kbm_pad.
+#   kbm_s1: solo aviso y log.  kbm_s2: s1 + enganches que solo llaman al original.
+$(INTDIR)/stage1.o: src/main.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DKBM_STAGE=1 '-DKBM_NAME="kbm_s1"' -o $@ $<
+
+$(STAGE1): $(CRT_OBJ) $(INTDIR)/stage1.o $(SDK_OBJS)
+	$(LD) $(INTDIR)/stage1.o $(SDK_OBJS) $(CRT_OBJ) -o $(INTDIR)/kbm_s1.elf $(LDFLAGS)
+	$(FSELF) -in=$(INTDIR)/kbm_s1.elf \
+	  -out=$(INTDIR)/kbm_s1.oelf --lib=$(STAGE1) --paid 0x3800000000000011
+
+$(INTDIR)/stage2.o: src/main.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DKBM_STAGE=2 '-DKBM_NAME="kbm_s2"' -o $@ $<
+
+$(STAGE2): $(CRT_OBJ) $(INTDIR)/stage2.o $(SDK_OBJS)
+	$(LD) $(INTDIR)/stage2.o $(SDK_OBJS) $(CRT_OBJ) -o $(INTDIR)/kbm_s2.elf $(LDFLAGS)
+	$(FSELF) -in=$(INTDIR)/kbm_s2.elf \
+	  -out=$(INTDIR)/kbm_s2.oelf --lib=$(STAGE2) --paid 0x3800000000000011
+
 clean:
-	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B)
+	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2)
 
 .PHONY: all clean

@@ -152,6 +152,17 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 
 #define KBM_BUILD "build-nolibc-3"   /* marca para saber que .prx esta cargado */
 
+/* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
+ *   1  solo aviso y log (sin enganches ni entrada)
+ *   2  etapa 1 + enganches de scePadRead/scePadReadState que solo llaman al original
+ *   3  completo (teclado y raton)  <- kbm_pad.prx */
+#ifndef KBM_STAGE
+#define KBM_STAGE 3
+#endif
+#ifndef KBM_NAME
+#define KBM_NAME "kbm_pad"
+#endif
+
 /* ------------------------------------------------- REGISTRO A ARCHIVO */
 /* Sin klog ni PC: el plugin escribe /data/GoldHEN/kbm_pad.log (se abre por
  * FTP). Cada linea se abre/escribe/cierra para que no se pierda nada si el
@@ -340,6 +351,7 @@ static void notify(const char *msg)
     kbm_log("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
 }
 
+#if KBM_STAGE >= 3
 /* ------------------------------------------------------------ ESTADO */
 typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
 typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
@@ -593,6 +605,26 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
     apply_kbm(&data[ret - 1]);   /* la muestra mas reciente */
     return ret;
 }
+#endif /* KBM_STAGE >= 3 */
+
+#if KBM_STAGE == 2
+/* Etapa 2: enganches que solo llaman al original (prueba del Detour). */
+typedef int32_t (*scePadReadState_t)(int32_t, KbmPadData *);
+typedef int32_t (*scePadRead_t)(int32_t, KbmPadData *, int32_t);
+
+HOOK_INIT(scePadReadState);
+HOOK_INIT(scePadRead);
+
+static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
+{
+    return HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
+}
+
+static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
+{
+    return HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
+}
+#endif /* KBM_STAGE == 2 */
 
 /* ---------------------------------------------- INICIO / FIN (idempotentes) */
 static bool g_hooked;
@@ -602,13 +634,15 @@ static void kbm_start(void)
     if (g_hooked)
         return;
     g_hooked = true;
-    kbm_log("[kbm_pad] cargado (%s)\n", KBM_BUILD);
-    notify("kbm_pad cargado");
+    kbm_log("[%s] cargado (%s, etapa %d)\n", KBM_NAME, KBM_BUILD, KBM_STAGE);
+    notify(KBM_NAME " cargado");
+#if KBM_STAGE >= 2
     kbm_log("[kbm_pad] enganchando scePadReadState...\n");
     HOOK(scePadReadState);
     kbm_log("[kbm_pad] enganchando scePadRead...\n");
     HOOK(scePadRead);
     kbm_log("[kbm_pad] enganches listos\n");
+#endif
 }
 
 static void kbm_stop(void)
@@ -616,9 +650,11 @@ static void kbm_stop(void)
     if (!g_hooked)
         return;
     g_hooked = false;
+#if KBM_STAGE >= 2
     UNHOOK(scePadReadState);
     UNHOOK(scePadRead);
-    kbm_log("[kbm_pad] descargado\n");
+#endif
+    kbm_log("[%s] descargado\n", KBM_NAME);
 }
 
 /* ------------------------------------------------------ ENTRY POINTS */
@@ -626,7 +662,7 @@ static void kbm_stop(void)
  * g_pluginName / plugin_load / plugin_unload y, si faltan plugin_load o
  * plugin_unload, NO da el plugin por cargado. Por eso se exportan con
  * visibilidad por defecto (no static). */
-__attribute__((visibility("default"))) const char *g_pluginName = "kbm_pad";
+__attribute__((visibility("default"))) const char *g_pluginName = KBM_NAME;
 
 __attribute__((visibility("default")))
 int plugin_load(int argc, const char *argv[])
