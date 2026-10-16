@@ -91,3 +91,8 @@ En el jailbreak para 13.00–13.52 el exploit no persiste: hay que cargar GoldHE
   `scePadReadState`. Algunos usan variantes (`...Ext`) que aún no están enganchadas.
 - **Logs:** el plugin escribe al klog con el prefijo `[kbm_pad]`; ahí verás si se
   abrieron el teclado y el ratón.
+
+## App kbm_manager (PKG)
+
+App para la PS4 que descarga el plugin, lo instala en `/data/GoldHEN/plugins/`, lo añade a `plugins.ini` y lo activa o desactiva (escribe `activo=1/0` en `kbm_pad.ini`). Se compila en GitHub Actions (`build-app.yml`) y el `.pkg` queda en la release **manager**.
+Controles: X instalar/actualizar, Cuadrado activar/desactivar, Triángulo desinstalar, Círculo salir.

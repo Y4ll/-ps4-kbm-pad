@@ -1,0 +1,52 @@
+name: Build kbm_manager PKG
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/build-app.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OO_PS4_TOOLCHAIN: ${{ github.workspace }}/oo-toolchain
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+      APP_VER: 1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar compilador y dependencias
+        run: sudo apt-get update && sudo apt-get install -y clang lld libicu-dev libssl-dev
+
+      - name: Descargar OpenOrbis PS4 Toolchain (ultimo release)
+        run: |
+          mkdir -p dl "$OO_PS4_TOOLCHAIN"
+          gh release download --repo OpenOrbis/OpenOrbis-PS4-Toolchain --pattern '*.tar.gz' --dir dl
+          tar -xzf dl/*.tar.gz -C "$OO_PS4_TOOLCHAIN"
+          if [ ! -f "$OO_PS4_TOOLCHAIN/link.x" ]; then
+            inner=$(dirname "$(find "$OO_PS4_TOOLCHAIN" -name link.x | head -1)")
+            cp -a "$inner"/. "$OO_PS4_TOOLCHAIN"/
+          fi
+          chmod +x "$OO_PS4_TOOLCHAIN"/bin/linux/* || true
+
+      - name: Compilar PKG
+        run: make -C app VERSION="$APP_VER" 2>&1 | tee app/build.log; exit ${PIPESTATUS[0]}
+
+      - name: Subir PKG como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: kbm_manager-PKG
+          path: app/*.pkg
+
+      - name: Publicar PKG en Releases (tag manager)
+        run: |
+          cp app/*.pkg kbm_manager.pkg
+          gh release delete manager --cleanup-tag -y || true
+          gh release create manager kbm_manager.pkg --target "$GITHUB_SHA" \
+            --title "kbm_manager (app PKG)" \
+            --notes "App para PS4: descarga el plugin kbm_pad y lo activa/desactiva. Version $APP_VER. Commit: $GITHUB_SHA"

@@ -2,3 +2,10 @@ build/
 *.prx
 *.elf
 *.oelf
+app/build/
+app/*.pkg
+app/pkg.gp4
+app/eboot.bin
+app/sce_module/
+app/sce_sys/param.sfo
+app/build.log
