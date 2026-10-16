@@ -161,7 +161,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-ext-1"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-cfg-5"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -498,7 +498,6 @@ static void remove_pad_hooks(void)
 static bool    g_ready;
 static bool    g_failed;
 static bool    g_enabled = true;
-static bool    g_toggle_down;
 static int32_t g_kb = -1;
 static int32_t g_mouse = -1;
 static float   g_rx, g_ry;   /* inercia del stick derecho */
@@ -833,15 +832,432 @@ static void start_update_thread(void)
     kbm_thread_create(&th, NULL, upd_thread, NULL, "kbm_upd");
 }
 
+/* ------------------------------------------------ CONFIGURACION (kbm_pad.ini) */
+/* Todo se puede cambiar editando /data/GoldHEN/kbm_pad.ini por FTP (se crea solo la
+ * primera vez) y pulsando F6 dentro del juego para recargarlo, sin recompilar.
+ * Sin funciones variadicas ni libc: el analizador es propio. */
+#define KBM_INI_PATH "/data/GoldHEN/kbm_pad.ini"
+
+#define KEY_NONE  0xFFFF   /* "ninguna" */
+#define KEY_BAD   0xFFFE   /* nombre de tecla desconocido */
+/* Modificadores: 0x100 + mascara de OrbisKeyboardData.mods (izq | der) */
+#define KEY_SHIFT 0x122
+#define KEY_CTRL  0x111
+#define KEY_ALT   0x144
+
+#define MOUSE_BTN_MIDDLE 0x4
+
+typedef struct { uint16_t code; uint32_t mask; } KbmBind;
+#define KBM_MAX_BINDS 48
+static KbmBind  g_binds[KBM_MAX_BINDS];
+static int      g_nbinds;
+static uint32_t g_mouse_map[3];            /* izq, der, medio -> boton del mando */
+static uint16_t g_k_pause, g_k_drive, g_k_sens_up, g_k_sens_dn, g_k_reload;
+static uint16_t g_k_fwd, g_k_back, g_k_left, g_k_right;
+static float    g_sens_x, g_sens_y, g_smooth, g_deadzone, g_accel;
+static bool     g_invert_y, g_aim_toggle;
+static bool     g_drive;                   /* modo conducir */
+static float    g_steer;                   /* volante suavizado */
+static int32_t  g_user;
+
+typedef struct { const char *name; uint32_t mask; } KbmBtnName;
+static const KbmBtnName k_btn_names[] = {
+    {"cruz", KBM_PAD_BUTTON_CROSS},       {"circulo", KBM_PAD_BUTTON_CIRCLE},
+    {"cuadrado", KBM_PAD_BUTTON_SQUARE},  {"triangulo", KBM_PAD_BUTTON_TRIANGLE},
+    {"l1", KBM_PAD_BUTTON_L1},            {"r1", KBM_PAD_BUTTON_R1},
+    {"l2", KBM_PAD_BUTTON_L2},            {"r2", KBM_PAD_BUTTON_R2},
+    {"l3", KBM_PAD_BUTTON_L3},            {"r3", KBM_PAD_BUTTON_R3},
+    {"options", KBM_PAD_BUTTON_OPTIONS},  {"touchpad", KBM_PAD_BUTTON_TOUCH_PAD},
+    {"dpad_arriba", KBM_PAD_BUTTON_UP},   {"dpad_abajo", KBM_PAD_BUTTON_DOWN},
+    {"dpad_izq", KBM_PAD_BUTTON_LEFT},    {"dpad_der", KBM_PAD_BUTTON_RIGHT},
+};
+
+typedef struct { const char *name; uint16_t code; } KbmKeyName;
+static const KbmKeyName k_key_names[] = {
+    {"espacio", 44}, {"space", 44}, {"enter", 40}, {"intro", 40}, {"tab", 43},
+    {"esc", 41}, {"borrar", 42}, {"caps", 57},
+    {"flecha_arriba", 82}, {"flecha_abajo", 81}, {"flecha_izq", 80}, {"flecha_der", 79},
+    {"shift", KEY_SHIFT}, {"ctrl", KEY_CTRL}, {"alt", KEY_ALT}, {"ninguna", KEY_NONE},
+};
+
+static const char k_ini_default[] =
+    "# kbm_pad - configuracion. Edita este archivo por FTP y en el juego pulsa F6 para recargarlo.\n"
+    "# Las lineas que empiezan con # se ignoran.\n"
+    "# Teclas: a-z, 0-9, f1-f12, espacio, enter, tab, esc, borrar, caps, shift, ctrl, alt,\n"
+    "# flecha_arriba, flecha_abajo, flecha_izq, flecha_der, ninguna.\n"
+    "# Un boton puede tener varias teclas separadas por coma (ejemplo: r3=ctrl,v).\n"
+    "\n"
+    "# --- Camara (raton) ---\n"
+    "# sens_x / sens_y: sube para girar mas rapido. suavizado: 0 = directo, 0.8 = muy suave.\n"
+    "# zona_muerta: la del stick del juego (sube si la camara no arranca con movimientos lentos).\n"
+    "# curva: 0 = lineal; mas alto = movimientos rapidos giran mucho mas que los lentos.\n"
+    "sens_x=6.0\n"
+    "sens_y=6.0\n"
+    "suavizado=0.40\n"
+    "zona_muerta=0.15\n"
+    "curva=0.40\n"
+    "invertir_y=0\n"
+    "alternar_mira=0\n"
+    "\n"
+    "# --- Teclas de control ---\n"
+    "tecla_pausa=f8\n"
+    "tecla_conducir=f7\n"
+    "tecla_sens_menos=f9\n"
+    "tecla_sens_mas=f10\n"
+    "tecla_recargar=f6\n"
+    "\n"
+    "# --- Movimiento (stick izquierdo) ---\n"
+    "adelante=w\n"
+    "atras=s\n"
+    "izquierda=a\n"
+    "derecha=d\n"
+    "\n"
+    "# --- Botones del mando ---\n"
+    "cruz=espacio\n"
+    "circulo=e\n"
+    "cuadrado=q\n"
+    "triangulo=r\n"
+    "l1=f\n"
+    "r1=g\n"
+    "l2=ninguna\n"
+    "r2=ninguna\n"
+    "l3=shift\n"
+    "r3=ctrl,v\n"
+    "options=enter\n"
+    "touchpad=tab\n"
+    "dpad_arriba=flecha_arriba\n"
+    "dpad_abajo=flecha_abajo\n"
+    "dpad_izq=flecha_izq\n"
+    "dpad_der=flecha_der\n"
+    "\n"
+    "# --- Raton: izq, der y medio pueden ser cualquier boton del mando (o ninguno) ---\n"
+    "raton_izq=r2\n"
+    "raton_der=l2\n"
+    "raton_medio=r3\n"
+    "\n"
+    "# Modo conducir (tecla_conducir, F7): W = acelerar (R2), S = frenar o reversa (L2),\n"
+    "# A y D = volante. Vuelve a pulsarla para regresar al modo normal.\n";
+
+static float kbm_absf(float v) { return v < 0.0f ? -v : v; }
+static float kbm_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static size_t kbm_len(const char *s)
+{
+    size_t n = 0;
+    while (s[n])
+        n++;
+    return n;
+}
+
+static bool kbm_streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static float parse_float(const char *s)
+{
+    float sign = 1.0f, v = 0.0f, scale = 0.1f;
+    if (*s == '-') {
+        sign = -1.0f;
+        s++;
+    }
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10.0f + (float)(*s - '0');
+        s++;
+    }
+    if (*s == '.' || *s == ',') {
+        s++;
+        while (*s >= '0' && *s <= '9') {
+            v += (float)(*s - '0') * scale;
+            scale *= 0.1f;
+            s++;
+        }
+    }
+    return sign * v;
+}
+
+static uint16_t parse_key(const char *s)
+{
+    if (!s[0])
+        return KEY_BAD;
+    if (!s[1]) {
+        char c = s[0];
+        if (c >= 'a' && c <= 'z') return (uint16_t)(4 + (c - 'a'));
+        if (c >= '1' && c <= '9') return (uint16_t)(30 + (c - '1'));
+        if (c == '0') return 39;
+    }
+    if (s[0] == 'f' && s[1] >= '1' && s[1] <= '9') {
+        int n = s[1] - '0';
+        if (s[2] == 0)
+            return (uint16_t)(58 + n - 1);
+        if (n == 1 && s[2] >= '0' && s[2] <= '2' && s[3] == 0)
+            return (uint16_t)(58 + (10 + (s[2] - '0')) - 1);
+        return KEY_BAD;
+    }
+    for (size_t i = 0; i < sizeof(k_key_names) / sizeof(k_key_names[0]); i++)
+        if (kbm_streq(s, k_key_names[i].name))
+            return k_key_names[i].code;
+    return KEY_BAD;
+}
+
+static uint32_t find_button(const char *s)
+{
+    for (size_t i = 0; i < sizeof(k_btn_names) / sizeof(k_btn_names[0]); i++)
+        if (kbm_streq(s, k_btn_names[i].name))
+            return k_btn_names[i].mask;
+    return 0;
+}
+
+static void bind_clear(uint32_t mask)
+{
+    int w = 0;
+    for (int i = 0; i < g_nbinds; i++)
+        if (g_binds[i].mask != mask)
+            g_binds[w++] = g_binds[i];
+    g_nbinds = w;
+}
+
+static void bind_add(uint16_t code, uint32_t mask)
+{
+    if (code == KEY_NONE || g_nbinds >= KBM_MAX_BINDS)
+        return;
+    g_binds[g_nbinds].code = code;
+    g_binds[g_nbinds].mask = mask;
+    g_nbinds++;
+}
+
+static void config_defaults(void)
+{
+    g_nbinds = 0;
+    bind_add(K_SPACE, KBM_PAD_BUTTON_CROSS);
+    bind_add(K_E, KBM_PAD_BUTTON_CIRCLE);
+    bind_add(K_Q, KBM_PAD_BUTTON_SQUARE);
+    bind_add(K_R, KBM_PAD_BUTTON_TRIANGLE);
+    bind_add(K_F, KBM_PAD_BUTTON_L1);
+    bind_add(K_G, KBM_PAD_BUTTON_R1);
+    bind_add(K_ENTER, KBM_PAD_BUTTON_OPTIONS);
+    bind_add(K_TAB, KBM_PAD_BUTTON_TOUCH_PAD);
+    bind_add(KEY_SHIFT, KBM_PAD_BUTTON_L3);
+    bind_add(KEY_CTRL, KBM_PAD_BUTTON_R3);
+    bind_add(25 /* v */, KBM_PAD_BUTTON_R3);
+    bind_add(K_UP, KBM_PAD_BUTTON_UP);
+    bind_add(K_DOWN, KBM_PAD_BUTTON_DOWN);
+    bind_add(K_LEFT, KBM_PAD_BUTTON_LEFT);
+    bind_add(K_RIGHT, KBM_PAD_BUTTON_RIGHT);
+    g_mouse_map[0] = KBM_PAD_BUTTON_R2;
+    g_mouse_map[1] = KBM_PAD_BUTTON_L2;
+    g_mouse_map[2] = KBM_PAD_BUTTON_R3;
+    g_k_pause = TOGGLE_KEYCODE;   /* F8 */
+    g_k_drive = 64;               /* F7 */
+    g_k_sens_dn = 66;             /* F9 */
+    g_k_sens_up = 67;             /* F10 */
+    g_k_reload = 63;              /* F6 */
+    g_k_fwd = K_W;
+    g_k_back = K_S;
+    g_k_left = K_A;
+    g_k_right = K_D;
+    g_sens_x = g_sens_y = MOUSE_SENS;
+    g_smooth = MOUSE_DECAY;
+    g_deadzone = MOUSE_DEADZONE;
+    g_accel = 0.40f;
+    g_invert_y = INVERT_MOUSE_Y != 0;
+    g_aim_toggle = AIM_TOGGLE != 0;
+}
+
+static void ini_bad(const char *key, const char *val)
+{
+    lb_s("[kbm_pad] ini: no entiendo \""); lb_s(key); lb_s("="); lb_s(val); lb_s("\"\n");
+    lb_flush();
+}
+
+static void ini_apply(const char *key, const char *val)
+{
+    if (kbm_streq(key, "sens_x"))      { g_sens_x = kbm_clampf(parse_float(val), 0.1f, 60.0f); return; }
+    if (kbm_streq(key, "sens_y"))      { g_sens_y = kbm_clampf(parse_float(val), 0.1f, 60.0f); return; }
+    if (kbm_streq(key, "suavizado"))   { g_smooth = kbm_clampf(parse_float(val), 0.0f, 0.90f); return; }
+    if (kbm_streq(key, "zona_muerta")) { g_deadzone = kbm_clampf(parse_float(val), 0.0f, 0.60f); return; }
+    if (kbm_streq(key, "curva"))       { g_accel = kbm_clampf(parse_float(val), 0.0f, 3.0f); return; }
+    if (kbm_streq(key, "invertir_y"))  { g_invert_y = parse_float(val) != 0.0f; return; }
+    if (kbm_streq(key, "alternar_mira")) { g_aim_toggle = parse_float(val) != 0.0f; return; }
+
+    uint16_t *kp = NULL;
+    if (kbm_streq(key, "tecla_pausa"))       kp = &g_k_pause;
+    else if (kbm_streq(key, "tecla_conducir"))    kp = &g_k_drive;
+    else if (kbm_streq(key, "tecla_sens_menos"))  kp = &g_k_sens_dn;
+    else if (kbm_streq(key, "tecla_sens_mas"))    kp = &g_k_sens_up;
+    else if (kbm_streq(key, "tecla_recargar"))    kp = &g_k_reload;
+    else if (kbm_streq(key, "adelante"))          kp = &g_k_fwd;
+    else if (kbm_streq(key, "atras"))             kp = &g_k_back;
+    else if (kbm_streq(key, "izquierda"))         kp = &g_k_left;
+    else if (kbm_streq(key, "derecha"))           kp = &g_k_right;
+    if (kp) {
+        uint16_t c = parse_key(val);
+        if (c == KEY_BAD) ini_bad(key, val);
+        else *kp = c;
+        return;
+    }
+
+    int mi = -1;
+    if (kbm_streq(key, "raton_izq")) mi = 0;
+    else if (kbm_streq(key, "raton_der")) mi = 1;
+    else if (kbm_streq(key, "raton_medio")) mi = 2;
+    if (mi >= 0) {
+        uint32_t m = find_button(val);
+        if (m == 0 && !kbm_streq(val, "ninguno") && !kbm_streq(val, "ninguna")) ini_bad(key, val);
+        else g_mouse_map[mi] = m;
+        return;
+    }
+
+    uint32_t mask = find_button(key);
+    if (mask) {
+        bind_clear(mask);
+        char tok[24];
+        const char *p = val;
+        while (*p) {
+            int n = 0;
+            while (*p && *p != ',') {
+                if (*p != ' ' && *p != '\t' && n < 23)
+                    tok[n++] = *p;
+                p++;
+            }
+            tok[n] = 0;
+            if (*p == ',')
+                p++;
+            if (n) {
+                uint16_t c = parse_key(tok);
+                if (c == KEY_BAD) ini_bad(key, tok);
+                else bind_add(c, mask);
+            }
+        }
+        return;
+    }
+    ini_bad(key, val);
+}
+
+static char *ini_trim(char *s)
+{
+    while (*s == ' ' || *s == '\t' || *s == '\r')
+        s++;
+    char *e = s + kbm_len(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'))
+        *--e = 0;
+    return s;
+}
+
+static char g_ini[4096];
+
+static void config_load(void)
+{
+    config_defaults();
+    if (!upd_exists(KBM_INI_PATH)) {
+        upd_write_small(KBM_INI_PATH, k_ini_default, sizeof(k_ini_default) - 1);
+        L("[kbm_pad] config: se creo kbm_pad.ini con los valores por defecto\n");
+        return;
+    }
+    int32_t fd = kbm_sys_open(KBM_INI_PATH, 0, 0);
+    if (fd < 0)
+        return;
+    size_t tot = 0;
+    for (;;) {
+        int64_t r = kbm_sys_read(fd, g_ini + tot, sizeof(g_ini) - 1 - tot);
+        if (r <= 0)
+            break;
+        tot += (size_t)r;
+        if (tot >= sizeof(g_ini) - 1)
+            break;
+    }
+    kbm_sys_close(fd);
+    g_ini[tot] = 0;
+
+    char *p = g_ini;
+    while (*p) {
+        char *line = p;
+        while (*p && *p != '\n')
+            p++;
+        if (*p)
+            *p++ = 0;
+        line = ini_trim(line);
+        if (!*line || *line == '#' || *line == ';')
+            continue;
+        char *eq = line;
+        while (*eq && *eq != '=')
+            eq++;
+        if (!*eq)
+            continue;
+        *eq = 0;
+        char *key = ini_trim(line);
+        char *val = ini_trim(eq + 1);
+        for (char *q = key; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q + 32);
+        for (char *q = val; *q; q++) if (*q >= 'A' && *q <= 'Z') *q = (char)(*q + 32);
+        ini_apply(key, val);
+    }
+    L("[kbm_pad] config: kbm_pad.ini cargado\n");
+}
+
+/* ------------------------------------------------------------ DISPOSITIVOS */
+static void cat_f1(char *dst, size_t cap, float v)   /* un decimal */
+{
+    int t = (int)(v * 10.0f + 0.5f);
+    kbm_cat_u(dst, cap, (uint32_t)(t / 10));
+    kbm_cat(dst, cap, ".");
+    kbm_cat_u(dst, cap, (uint32_t)(t % 10));
+}
+
+static void open_devices(bool first)
+{
+    bool had_kb = g_kb >= 0, had_m = g_mouse >= 0;
+    if (g_kb < 0 && p_kbInit && p_kbOpen) {
+        p_kbInit();
+        g_kb = p_kbOpen(g_user, 0, 0, NULL);
+    }
+    if (g_mouse < 0 && p_mInit && p_mOpen) {
+        p_mInit();
+        g_mouse = p_mOpen(g_user, 0, 0, NULL);
+    }
+    bool kb_new = !had_kb && g_kb >= 0, m_new = !had_m && g_mouse >= 0;
+    if (!kb_new && !m_new && !first)
+        return;
+
+    lb_s("[kbm_pad] user="); lb_d(g_user); lb_s(" keyboard="); lb_d(g_kb);
+    lb_s(" mouse="); lb_d(g_mouse); lb_s("\n"); lb_flush();
+
+    char msg[96];
+    msg[0] = 0;
+    kbm_cat(msg, sizeof(msg), "kbm_pad: ");
+    if (g_kb >= 0 && g_mouse >= 0)  kbm_cat(msg, sizeof(msg), "teclado y raton listos");
+    else if (g_kb >= 0)             kbm_cat(msg, sizeof(msg), "teclado listo (conecta el raton)");
+    else if (g_mouse >= 0)          kbm_cat(msg, sizeof(msg), "raton listo (conecta el teclado)");
+    else                            kbm_cat(msg, sizeof(msg), "conecta teclado y raton");
+    notify(msg);
+}
+
+/* Deteccion automatica: si falta algun dispositivo se reintenta abrirlo cada ~2 s,
+ * asi se puede conectar con el juego ya abierto. */
+static void poll_devices(void)
+{
+    static int tick;
+    if (g_kb >= 0 && g_mouse >= 0)
+        return;
+    if (++tick < 120)
+        return;
+    tick = 0;
+    open_devices(false);
+}
+
 static void ensure_input(void)
 {
     if (g_ready || g_failed)
         return;
 
     note("kbm_pad: paso 1 (iniciando entrada)");
-    int32_t user = 0;
-    sceUserServiceGetInitialUser(&user);
+    sceUserServiceGetInitialUser(&g_user);
     note("kbm_pad: paso 2 (usuario OK)");
+
+    config_load();
 
     /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
      * resuelven por ruta y dlsym. */
@@ -851,40 +1267,14 @@ static void ensure_input(void)
 
     if (!resolve_input_libs()) {
         L("[kbm_pad] no se pudo resolver teclado ni raton\n");
-        note("kbm_pad: no se pudo cargar teclado/raton");
+        notify("kbm_pad: no se pudo cargar teclado/raton");
         g_failed = true;
         return;
     }
 
     note("kbm_pad: paso 4 (librerias resueltas)");
-    if (p_kbInit && p_kbOpen) {
-        p_kbInit();
-        g_kb = p_kbOpen(user, 0, 0, NULL);
-    }
-    if (p_mInit && p_mOpen) {
-        p_mInit();
-        g_mouse = p_mOpen(user, 0, 0, NULL);
-    }
-
-    lb_s("[kbm_pad] user="); lb_d(user); lb_s(" keyboard="); lb_d(g_kb);
-    lb_s(" mouse="); lb_d(g_mouse); lb_s("\n"); lb_flush();
-
-    /* Se ejecuta en la primera llamada al hook: si este aviso sale, el hook
-     * del mando SI se esta disparando. */
-    char msg[96];
-    msg[0] = 0;
-    kbm_cat(msg, sizeof(msg), "kbm_pad: teclado=");
-    kbm_cat(msg, sizeof(msg), g_kb >= 0 ? "OK" : "FALLO");
-    kbm_cat(msg, sizeof(msg), ", raton=");
-    kbm_cat(msg, sizeof(msg), g_mouse >= 0 ? "OK" : "FALLO");
-    note(msg);
-
-    if (g_kb < 0 && g_mouse < 0) {
-        L("[kbm_pad] no se abrio ni teclado ni raton\n");
-        g_failed = true;
-        return;
-    }
-    g_ready = true;
+    open_devices(true);
+    g_ready = true;   /* aunque falte algun dispositivo: poll_devices lo reintenta */
 }
 
 static bool has_key(const OrbisKeyboardData *kd, uint16_t code)
@@ -895,6 +1285,22 @@ static bool has_key(const OrbisKeyboardData *kd, uint16_t code)
     return false;
 }
 
+static bool key_down(const OrbisKeyboardData *kd, uint16_t code)
+{
+    if (code == KEY_NONE || code == KEY_BAD)
+        return false;
+    if (code >= 0x100)
+        return (kd->mods & (uint32_t)(code & 0xFF)) != 0;
+    return has_key(kd, code);
+}
+
+static bool edge(bool down, bool *prev)
+{
+    bool r = down && !*prev;
+    *prev = down;
+    return r;
+}
+
 static uint8_t to_axis(float v)   /* -1..1 -> 0..255 */
 {
     if (v > 1.0f) v = 1.0f;
@@ -903,16 +1309,23 @@ static uint8_t to_axis(float v)   /* -1..1 -> 0..255 */
 }
 
 /* Salta la zona muerta del juego: 0 se queda en 0; cualquier otro valor arranca en
- * MOUSE_DEADZONE y llega a 1.0. */
+ * g_deadzone y llega a 1.0. */
 static float comp_deadzone(float v)
 {
     if (v > -0.02f && v < 0.02f)
         return 0.0f;
-    float a = v < 0.0f ? -v : v;
+    float a = kbm_absf(v);
     if (a > 1.0f)
         a = 1.0f;
-    a = MOUSE_DEADZONE + a * (1.0f - MOUSE_DEADZONE);
+    a = g_deadzone + a * (1.0f - g_deadzone);
     return v < 0.0f ? -a : a;
+}
+
+static void pad_press(KbmPadData *d, uint32_t mask)
+{
+    d->buttons |= mask;
+    if (mask & KBM_PAD_BUTTON_L2) d->analogButtons.l2 = 255;
+    if (mask & KBM_PAD_BUTTON_R2) d->analogButtons.r2 = 255;
 }
 
 /* Mezcla teclado + raton en un KbmPadData. */
@@ -923,92 +1336,114 @@ static void apply_kbm(KbmPadData *d)
     if (g_kb >= 0 && p_kbRead && p_kbRead(g_kb, &kd) < 0)
         kbm_zero(&kd, sizeof(kd));
 
-    /* Toggle con F8 (flanco de subida) */
-    bool t = has_key(&kd, TOGGLE_KEYCODE);
-    if (t && !g_toggle_down) {
+    /* Teclas de control (flanco de subida) */
+    static bool e_pause, e_drive, e_up, e_dn, e_reload;
+    if (edge(key_down(&kd, g_k_pause), &e_pause)) {
         g_enabled = !g_enabled;
         L(g_enabled ? "[kbm_pad] ACTIVO\n" : "[kbm_pad] PAUSA\n");
-        note(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
+        notify(g_enabled ? "kbm_pad ACTIVO (teclado y raton = mando)" : "kbm_pad PAUSA (mando normal)");
     }
-    g_toggle_down = t;
+    if (edge(key_down(&kd, g_k_drive), &e_drive)) {
+        g_drive = !g_drive;
+        g_steer = 0.0f;
+        notify(g_drive ? "kbm_pad: modo CONDUCIR (W acelera, S frena, A/D volante)"
+                       : "kbm_pad: modo NORMAL");
+    }
+    bool sens_up = edge(key_down(&kd, g_k_sens_up), &e_up);
+    bool sens_dn = edge(key_down(&kd, g_k_sens_dn), &e_dn);
+    if (sens_up || sens_dn) {
+        float f = sens_up ? 1.2f : (1.0f / 1.2f);
+        g_sens_x = kbm_clampf(g_sens_x * f, 0.5f, 60.0f);
+        g_sens_y = kbm_clampf(g_sens_y * f, 0.5f, 60.0f);
+        char m[64];
+        m[0] = 0;
+        kbm_cat(m, sizeof(m), "kbm_pad: sensibilidad ");
+        cat_f1(m, sizeof(m), g_sens_x);
+        notify(m);
+    }
+    if (edge(key_down(&kd, g_k_reload), &e_reload)) {
+        config_load();
+        notify("kbm_pad: configuracion recargada");
+    }
 
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
     int32_t dx = 0, dy = 0;
     /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
-     * sigue como estaba; antes se ponia a 0 y la mira (L2) se soltaba sola. */
+     * sigue como estaba. */
     static uint32_t g_mbtn;
-    uint32_t mbtn;
     if (g_mouse >= 0 && p_mRead) {
-        int drained = 0;
-        /* Se leen TODAS las muestras pendientes (hasta 256). Con solo 8 por lectura,
-         * un raton rapido llenaba la cola: movimiento a saltos y clics que llegaban
-         * tarde o se perdian (no se podia mantener pulsado). */
+        /* Se leen TODAS las muestras pendientes (hasta 256): con pocas por lectura la
+         * cola se llenaba y el movimiento iba a saltos. */
         for (int i = 0; i < 256; i++) {
             KbmMouseBuf mb;
             kbm_zero(&mb, sizeof(mb));
             int32_t n = p_mRead(g_mouse, &mb, 1);
             if (n <= 0)
                 break;
-            drained++;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
-            if (mb.m.buttons != g_mbtn) {   /* diagnostico: aviso en cada cambio de botones */
+            if (mb.m.buttons != g_mbtn) {   /* diagnostico: cambios de botones al log */
                 static int g_btn_notices;
                 if (g_btn_notices < 8) {
                     g_btn_notices++;
-                    char m[64];
-                    m[0] = 0;
-                    kbm_cat(m, sizeof(m), "raton botones=");
-                    lb_s(""); /* mantiene el constructor de linea vacio */
-                    char hx[12];
+                    char m[64], hx[12];
                     static const char h[] = "0123456789abcdef";
                     uint32_t v = mb.m.buttons;
                     int k = 0;
                     for (int sh = 28; sh >= 0; sh -= 4)
                         hx[k++] = h[(v >> sh) & 15];
                     hx[k] = 0;
+                    m[0] = 0;
+                    kbm_cat(m, sizeof(m), "raton botones=");
                     kbm_cat(m, sizeof(m), hx);
                     note(m);
                 }
             }
             g_mbtn = mb.m.buttons;
         }
-        {   /* diagnostico (una sola vez): confirma que habia cola acumulada */
-            static bool g_backlog_notified;
-            if (drained > 8 && !g_backlog_notified) {
-                g_backlog_notified = true;
-                char m[64];
-                m[0] = 0;
-                kbm_cat(m, sizeof(m), "raton: ");
-                kbm_cat_u(m, sizeof(m), (uint32_t)drained);
-                kbm_cat(m, sizeof(m), " muestras en una lectura");
-                note(m);
-            }
-        }
     }
-    mbtn = g_mbtn;
+    uint32_t mbtn = g_mbtn;
 
     if (!g_enabled)
         return;
 
-    /* Stick izquierdo: WASD */
-    float lx = (has_key(&kd, K_D) ? 1.0f : 0.0f) - (has_key(&kd, K_A) ? 1.0f : 0.0f);
-    float ly = (has_key(&kd, K_S) ? 1.0f : 0.0f) - (has_key(&kd, K_W) ? 1.0f : 0.0f);
-    if (lx != 0.0f || ly != 0.0f) {
-        if (lx != 0.0f && ly != 0.0f) {   /* diagonal: no pasar de 1.0 */
-            lx *= 0.7071f;
-            ly *= 0.7071f;
+    bool k_fwd = key_down(&kd, g_k_fwd), k_back = key_down(&kd, g_k_back);
+    bool k_left = key_down(&kd, g_k_left), k_right = key_down(&kd, g_k_right);
+
+    if (g_drive) {
+        /* Conducir: W = acelerar (R2), S = frenar / reversa (L2), A y D = volante con
+         * rampa suave (el giro completo e instantaneo era demasiado brusco). */
+        if (k_fwd)  pad_press(d, KBM_PAD_BUTTON_R2);
+        if (k_back) pad_press(d, KBM_PAD_BUTTON_L2);
+        float tx = (k_right ? 1.0f : 0.0f) - (k_left ? 1.0f : 0.0f);
+        g_steer += (tx * 1.05f - g_steer) * (tx != 0.0f ? 0.35f : 0.55f);
+        if (kbm_absf(g_steer) < 0.03f)
+            g_steer = 0.0f;
+        if (g_steer != 0.0f)
+            d->leftStick.x = to_axis(g_steer);
+    } else {
+        /* Stick izquierdo: adelante / atras / izquierda / derecha */
+        float lx = (k_right ? 1.0f : 0.0f) - (k_left ? 1.0f : 0.0f);
+        float ly = (k_back ? 1.0f : 0.0f) - (k_fwd ? 1.0f : 0.0f);
+        if (lx != 0.0f || ly != 0.0f) {
+            if (lx != 0.0f && ly != 0.0f) {   /* diagonal: no pasar de 1.0 */
+                lx *= 0.7071f;
+                ly *= 0.7071f;
+            }
+            d->leftStick.x = to_axis(lx);
+            d->leftStick.y = to_axis(ly);
         }
-        d->leftStick.x = to_axis(lx);
-        d->leftStick.y = to_axis(ly);
     }
 
-    /* Stick derecho: movimiento del raton con algo de inercia */
-#if INVERT_MOUSE_Y
-    dy = -dy;
-#endif
-    g_rx = g_rx * MOUSE_DECAY + ((float)dx / 127.0f) * MOUSE_SENS * (1.0f - MOUSE_DECAY);
-    g_ry = g_ry * MOUSE_DECAY + ((float)dy / 127.0f) * MOUSE_SENS * (1.0f - MOUSE_DECAY);
+    /* Stick derecho = camara: sensibilidad por eje, curva y suavizado configurables */
+    float fx = (float)dx * g_sens_x / 127.0f;
+    float fy = (float)dy * g_sens_y / 127.0f;
+    if (g_invert_y)
+        fy = -fy;
+    fx *= 1.0f + g_accel * kbm_absf(fx);
+    fy *= 1.0f + g_accel * kbm_absf(fy);
+    g_rx = g_rx * g_smooth + fx * (1.0f - g_smooth);
+    g_ry = g_ry * g_smooth + fy * (1.0f - g_smooth);
     {
         /* El juego ignora el stick por debajo de su zona muerta: sin compensarla, los
          * movimientos lentos del raton se perdian y la camara iba a saltos. */
@@ -1019,41 +1454,32 @@ static void apply_kbm(KbmPadData *d)
         }
     }
 
-    /* Gatillos: clic izq = R2, clic der = L2 */
-    if (mbtn & MOUSE_BTN_LEFT)  { d->buttons |= KBM_PAD_BUTTON_R2; d->analogButtons.r2 = 255; }
-#if AIM_TOGGLE
-    {   /* un clic activa la mira, otro clic la quita (no hace falta mantener) */
-        static bool g_aim_on, g_right_prev;
+    /* Botones del raton -> botones del mando (configurable) */
+    {
+        uint32_t pm = 0;
+        if (mbtn & MOUSE_BTN_LEFT)
+            pm |= g_mouse_map[0];
         bool right = (mbtn & MOUSE_BTN_RIGHT) != 0;
-        if (right && !g_right_prev)
-            g_aim_on = !g_aim_on;
-        g_right_prev = right;
-        if (g_aim_on) { d->buttons |= KBM_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
+        if (g_aim_toggle) {   /* un clic activa, otro clic desactiva */
+            static bool aim_on, right_prev;
+            if (right && !right_prev)
+                aim_on = !aim_on;
+            right_prev = right;
+            if (aim_on)
+                pm |= g_mouse_map[1];
+        } else if (right) {
+            pm |= g_mouse_map[1];
+        }
+        if (mbtn & MOUSE_BTN_MIDDLE)
+            pm |= g_mouse_map[2];
+        if (pm)
+            pad_press(d, pm);
     }
-#else
-    if (mbtn & MOUSE_BTN_RIGHT) { d->buttons |= KBM_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
-#endif
 
-    /* Botones */
-    if (has_key(&kd, K_SPACE)) d->buttons |= KBM_PAD_BUTTON_CROSS;
-    if (has_key(&kd, K_E))     d->buttons |= KBM_PAD_BUTTON_CIRCLE;
-    if (has_key(&kd, K_Q))     d->buttons |= KBM_PAD_BUTTON_SQUARE;
-    if (has_key(&kd, K_R))     d->buttons |= KBM_PAD_BUTTON_TRIANGLE;
-    if (has_key(&kd, K_F))     d->buttons |= KBM_PAD_BUTTON_L1;
-    if (has_key(&kd, K_G))     d->buttons |= KBM_PAD_BUTTON_R1;
-    if (has_key(&kd, K_ENTER)) d->buttons |= KBM_PAD_BUTTON_OPTIONS;
-    if (has_key(&kd, K_TAB))   d->buttons |= KBM_PAD_BUTTON_TOUCH_PAD;
-    if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_SHIFT | ORBIS_KEYBOARD_MOD_RIGHT_SHIFT))
-        d->buttons |= KBM_PAD_BUTTON_L3;
-    if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_CTRL | ORBIS_KEYBOARD_MOD_RIGHT_CTRL))
-        d->buttons |= KBM_PAD_BUTTON_R3;
-
-    /* D-pad: flechas */
-    if (has_key(&kd, K_UP))    d->buttons |= KBM_PAD_BUTTON_UP;
-    if (has_key(&kd, K_DOWN))  d->buttons |= KBM_PAD_BUTTON_DOWN;
-    if (has_key(&kd, K_LEFT))  d->buttons |= KBM_PAD_BUTTON_LEFT;
-    if (has_key(&kd, K_RIGHT)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
-
+    /* Teclas -> botones del mando (tabla configurable) */
+    for (int i = 0; i < g_nbinds; i++)
+        if (key_down(&kd, g_binds[i].code))
+            pad_press(d, g_binds[i].mask);
 }
 
 /* Rellena un KbmPadData neutro cuando no hay mando fisico. */
@@ -1076,6 +1502,9 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
     ensure_input();
     if (!g_ready || data == NULL)
         return ret;
+    poll_devices();
+    if (g_kb < 0 && g_mouse < 0)   /* sin teclado ni raton: el mando no se toca */
+        return ret;
 
     if (ret != 0) {          /* no hay mando real: inventamos uno */
         fake_pad(data);
@@ -1092,6 +1521,9 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
     int32_t ret = scePadReadExt(handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
+        return ret;
+    poll_devices();
+    if (g_kb < 0 && g_mouse < 0)   /* sin teclado ni raton: el mando no se toca */
         return ret;
 
     if (ret <= 0) {          /* no hay mando real */
