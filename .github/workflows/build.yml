@@ -97,7 +97,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest kbm_pad.prx kbm_s1k.prx kbm_probe_c.prx kbm_s1.prx kbm_s2.prx kbm_probe.prx kbm_probe_a.prx kbm_probe_b.prx \
+          gh release create latest kbm_pad.prx kbm_s1n.prx kbm_probe_d.prx kbm_s1k.prx kbm_probe_c.prx kbm_s1.prx kbm_s2.prx kbm_probe.prx kbm_probe_a.prx kbm_probe_b.prx \
             --title "Ultima compilacion" --target "$GITHUB_SHA" \
             --notes "Archivos .prx directos (sin zip). Commit: $GITHUB_SHA"
 
@@ -114,4 +114,6 @@ jobs:
             kbm_s2.prx
             kbm_s1k.prx
             kbm_probe_c.prx
+            kbm_s1n.prx
+            kbm_probe_d.prx
           if-no-files-found: error

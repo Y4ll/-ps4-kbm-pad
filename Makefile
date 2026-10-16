@@ -55,7 +55,10 @@ SDK_OBJS   := $(filter $(INTDIR)/sdk_%.o,$(OBJS))
 STAGE1K    := kbm_s1k.prx
 PROBE_C    := kbm_probe_c.prx
 
-all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C)
+STAGE1N    := kbm_s1n.prx
+PROBE_D    := kbm_probe_d.prx
+
+all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C) $(STAGE1N) $(PROBE_D)
 
 $(INTDIR):
 	@mkdir -p $(INTDIR)
@@ -144,7 +147,26 @@ $(PROBE_C): $(CRT_OBJ) $(INTDIR)/probe_c.o
 	$(FSELF) -in=$(INTDIR)/kbm_probe_c.elf \
 	  -out=$(INTDIR)/kbm_probe_c.oelf --lib=$(PROBE_C) --paid 0x3800000000000011
 
+# Separar "combinacion SDK + librerias" de "contenido de main.c".
+#   kbm_probe_d: probe + objetos del SDK + Pad/UserService/Sysmodule (lo que ningun probe tenia junto).
+#   kbm_s1n: main.c etapa 1 SIN objetos del SDK ni librerias extra (enlazado como un probe).
+$(INTDIR)/probe_d.o: probe/probe.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DPROBE_VARIANT=4 -o $@ $<
+
+$(PROBE_D): $(CRT_OBJ) $(INTDIR)/probe_d.o $(SDK_OBJS)
+	$(LD) $(INTDIR)/probe_d.o $(SDK_OBJS) $(CRT_OBJ) -o $(INTDIR)/kbm_probe_d.elf $(LDFLAGS_K)
+	$(FSELF) -in=$(INTDIR)/kbm_probe_d.elf \
+	  -out=$(INTDIR)/kbm_probe_d.oelf --lib=$(PROBE_D) --paid 0x3800000000000011
+
+$(INTDIR)/stage1n.o: src/main.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DKBM_STAGE=1 '-DKBM_NAME="kbm_s1n"' -o $@ $<
+
+$(STAGE1N): $(CRT_OBJ) $(INTDIR)/stage1n.o
+	$(LD) $(INTDIR)/stage1n.o $(CRT_OBJ) -o $(INTDIR)/kbm_s1n.elf $(LDBASE) -lkernel -lSceLibcInternal
+	$(FSELF) -in=$(INTDIR)/kbm_s1n.elf \
+	  -out=$(INTDIR)/kbm_s1n.oelf --lib=$(STAGE1N) --paid 0x3800000000000011
+
 clean:
-	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C)
+	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B) $(STAGE1) $(STAGE2) $(STAGE1K) $(PROBE_C) $(STAGE1N) $(PROBE_D)
 
 .PHONY: all clean

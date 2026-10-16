@@ -25,6 +25,8 @@
 #define PROBE_NAME "kbm_probe_b"
 #elif PROBE_VARIANT == 3
 #define PROBE_NAME "kbm_probe_c"
+#elif PROBE_VARIANT == 4
+#define PROBE_NAME "kbm_probe_d"
 #else
 #define PROBE_NAME "kbm_probe"
 #endif
@@ -36,7 +38,7 @@ extern int64_t probe_write(int32_t fd, const void *buf, size_t n)
 extern int32_t probe_close(int32_t fd)
     __asm__("sceKernelClose");
 
-#if PROBE_VARIANT == 1
+#if PROBE_VARIANT == 1 || PROBE_VARIANT == 4
 /* Fuerza las mismas importaciones de libreria que kbm_pad (no se llaman). */
 extern int32_t scePadReadState(int32_t handle, void *data);
 extern int32_t sceUserServiceGetInitialUser(int32_t *userId);
