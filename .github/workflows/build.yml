@@ -43,12 +43,14 @@ jobs:
             echo "headers:"; ls "$OO_PS4_TOOLCHAIN/include/orbis" | grep -E "^(Pad|Keyboard|Mouse|UserService|Sysmodule|libkernel)\.h$" | tr "\n" " "; echo
             echo "types:"; ls "$OO_PS4_TOOLCHAIN/include/orbis/_types" | grep -i -E "keyboard|pad|sysmodule" | tr "\n" " "; echo
             echo "clang:"; clang --version | head -1
-            echo "libs:"; ls "$OO_PS4_TOOLCHAIN/lib" | tr "\n" " "; echo
-            echo "headers:"; ls "$OO_PS4_TOOLCHAIN/include/orbis" | tr "\n" " "; echo
-            echo "bin/data:"; ls "$OO_PS4_TOOLCHAIN/bin/data" 2>&1 | tr "\n" " "; echo
-            echo "bin/linux:"; ls "$OO_PS4_TOOLCHAIN/bin/linux" | tr "\n" " "; echo
-            echo "right.sprx:"; find "$OO_PS4_TOOLCHAIN" -name "right.sprx" 2>/dev/null | head -3
-            echo "crt1:"; ls "$OO_PS4_TOOLCHAIN/lib/crt1.o" 2>&1' 2>&1 || true)
+            T="$OO_PS4_TOOLCHAIN"
+            for f in lib/libSceVideoOut.so lib/libSceKeyboard.so lib/libSceMouse.so lib/libScePad.so lib/libSceUserService.so lib/libSceSysmodule.so lib/libc.so lib/libkernel.so lib/libSceLibcInternal.so lib/crt1.o include/orbis/VideoOut.h include/orbis/Keyboard.h include/orbis/Mouse.h bin/linux/PkgTool.Core bin/linux/create-gp4 bin/linux/create-fself; do
+              if [ -e "$T/$f" ]; then echo "SI  $f"; else echo "NO  $f"; fi
+            done
+            echo "right.sprx:"; find "$T" -name "right.sprx" 2>/dev/null | head -3
+            echo "bin/data:"; ls "$T/bin/data" 2>&1 | head -20 | tr "\n" " "; echo
+            echo "bin/linux:"; ls "$T/bin/linux" | head -20 | tr "\n" " "; echo
+            echo "uid:"; id -u' 2>&1 || true)
           echo "::notice title=Toolchain info::$(printf '%s' "$info" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
 
       - name: Build kbm_pad.prx
