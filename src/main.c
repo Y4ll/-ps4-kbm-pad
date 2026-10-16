@@ -19,10 +19,11 @@
 #include "Detour.h"
 #include "Utilities.h"
 
-/* El HOOK() del SDK imprime con klog (= printf de libc). Se redirige al registro
- * propio, que no usa libc. */
+/* Los macros HOOK() del SDK llaman a klog (= printf de libc, variadica). El README
+ * del SDK avisa de que el registro con va_args cuelga los plugins, asi que aqui
+ * se anula: ningun codigo de este plugin usa funciones variadicas. */
 #undef klog
-#define klog kbm_log
+#define klog(...) ((void)0)
 
 /* ------------------------------------------------- MANDO (sin header) */
 /* El layout de KbmPadData cambia entre releases de OpenOrbis; aqui va el
@@ -150,7 +151,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-relro-1"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-novarargs-1"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -168,8 +169,6 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
  * FTP). Cada linea se abre/escribe/cierra para que no se pierda nada si el
  * juego se cuelga. Las etiquetas asm evitan chocar con las declaraciones del
  * header del toolchain. Flags FreeBSD: O_WRONLY=1, O_APPEND=8, O_CREAT=0x200. */
-#include <stdarg.h>
-
 #define KBM_LOG_PATH "/data/GoldHEN/kbm_pad.log"
 
 /* Ancla de .data.rel.ro. Hallazgo (comparando los .prx por dentro): todos los
@@ -212,14 +211,26 @@ static void kbm_copy(char *dst, size_t cap, const char *src)
     dst[i] = 0;
 }
 
-static size_t kbm_put(char *buf, size_t cap, size_t pos, char c)
+/* Constructor de linea SIN funciones variadicas: se arma con lb_s / lb_d / lb_x
+ * y se escribe con lb_flush. */
+static char   g_lb[512];
+static size_t g_lbn;
+
+static void lb_c(char c)
 {
-    if (pos + 1 < cap)
-        buf[pos] = c;
-    return pos + 1;
+    if (g_lbn + 1 < sizeof(g_lb))
+        g_lb[g_lbn++] = c;
 }
 
-static size_t kbm_putu(char *buf, size_t cap, size_t pos, uint64_t v, unsigned base)
+static void lb_s(const char *s)
+{
+    if (!s)
+        s = "(null)";
+    while (*s)
+        lb_c(*s++);
+}
+
+static void lb_u(uint64_t v, unsigned base)
 {
     char tmp[24];
     int n = 0;
@@ -231,90 +242,57 @@ static size_t kbm_putu(char *buf, size_t cap, size_t pos, uint64_t v, unsigned b
         v /= base;
     }
     while (n)
-        pos = kbm_put(buf, cap, pos, tmp[--n]);
-    return pos;
+        lb_c(tmp[--n]);
 }
 
-static int kbm_vfmt(char *buf, size_t cap, const char *fmt, va_list ap)
+static void lb_d(int32_t v)
 {
-    size_t pos = 0;
-    for (; *fmt; fmt++) {
-        if (*fmt != '%') {
-            pos = kbm_put(buf, cap, pos, *fmt);
-            continue;
-        }
-        fmt++;
-        if (!*fmt)
-            break;
-        switch (*fmt) {
-        case 's': {
-            const char *s = va_arg(ap, const char *);
-            if (!s)
-                s = "(null)";
-            while (*s)
-                pos = kbm_put(buf, cap, pos, *s++);
-            break;
-        }
-        case 'd': {
-            int32_t v = va_arg(ap, int);
-            if (v < 0) {
-                pos = kbm_put(buf, cap, pos, '-');
-                pos = kbm_putu(buf, cap, pos, (uint64_t)(-(int64_t)v), 10);
-            } else {
-                pos = kbm_putu(buf, cap, pos, (uint64_t)v, 10);
-            }
-            break;
-        }
-        case 'u':
-            pos = kbm_putu(buf, cap, pos, va_arg(ap, unsigned), 10);
-            break;
-        case 'x':
-            pos = kbm_putu(buf, cap, pos, va_arg(ap, unsigned), 16);
-            break;
-        case 'p':
-            pos = kbm_put(buf, cap, pos, '0');
-            pos = kbm_put(buf, cap, pos, 'x');
-            pos = kbm_putu(buf, cap, pos, (uint64_t)(uintptr_t)va_arg(ap, void *), 16);
-            break;
-        case '%':
-            pos = kbm_put(buf, cap, pos, '%');
-            break;
-        default:
-            pos = kbm_put(buf, cap, pos, '%');
-            pos = kbm_put(buf, cap, pos, *fmt);
-            break;
-        }
+    if (v < 0) {
+        lb_c('-');
+        lb_u((uint64_t)(-(int64_t)v), 10);
+    } else {
+        lb_u((uint64_t)v, 10);
     }
-    if (cap)
-        buf[pos < cap ? pos : cap - 1] = 0;
-    return (int)pos;
 }
 
-static int kbm_fmt(char *buf, size_t cap, const char *fmt, ...)
+static void lb_x(uint64_t v)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    int n = kbm_vfmt(buf, cap, fmt, ap);
-    va_end(ap);
-    return n;
+    lb_c('0');
+    lb_c('x');
+    lb_u(v, 16);
 }
 
-static void kbm_log(const char *fmt, ...)
+static void lb_flush(void)
 {
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = kbm_vfmt(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n <= 0)
+    size_t n = g_lbn;
+    g_lbn = 0;
+    if (n == 0)
         return;
-    if (n >= (int)sizeof(buf))
-        n = (int)sizeof(buf) - 1;
+    g_lb[n] = 0;
     int32_t fd = kbm_sys_open(KBM_LOG_PATH, 0x0001 | 0x0008 | 0x0200, 0666);
     if (fd >= 0) {
-        kbm_sys_write(fd, buf, (size_t)n);
+        kbm_sys_write(fd, g_lb, n);
         kbm_sys_close(fd);
     }
+}
+
+/* Una sola cadena, una linea. */
+static void L(const char *a)
+{
+    lb_s(a);
+    lb_flush();
+}
+
+/* Agrega src al final de dst (para armar el texto de los avisos). */
+static void kbm_cat(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0;
+    while (dst[i] && i + 1 < cap)
+        i++;
+    size_t j = 0;
+    while (src[j] && i + 1 < cap)
+        dst[i++] = src[j++];
+    dst[i] = 0;
 }
 
 /* ------------------------------------------------- NOTIFICACIONES */
@@ -360,7 +338,7 @@ static void notify(const char *msg)
     kbm_copy(req.icon_image_uri, sizeof(req.icon_image_uri),
              "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
-    kbm_log("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
+    lb_s("[kbm_pad] aviso \""); lb_s(msg); lb_s("\" -> "); lb_d(r); lb_s("\n"); lb_flush();
 }
 
 #if KBM_STAGE >= 3
@@ -391,7 +369,8 @@ static int32_t load_lib(const char *path)
 {
     int32_t res = 0;
     int32_t h = kbm_load_module(path, 0, NULL, 0, NULL, &res);
-    kbm_log("[kbm_pad] cargar %s -> handle=0x%x res=%d\n", path, (unsigned)h, res);
+    lb_s("[kbm_pad] cargar "); lb_s(path); lb_s(" -> handle="); lb_x((uint32_t)h);
+    lb_s(" res="); lb_d(res); lb_s("\n"); lb_flush();
     return h;
 }
 
@@ -399,7 +378,8 @@ static void *find_sym(int32_t handle, const char *name)
 {
     void *addr = NULL;
     int32_t r = kbm_dlsym(handle, name, &addr);
-    kbm_log("[kbm_pad] dlsym %s -> %d addr=%p\n", name, r, addr);
+    lb_s("[kbm_pad] dlsym "); lb_s(name); lb_s(" -> "); lb_d(r); lb_s(" addr=");
+    lb_x((uint64_t)(uintptr_t)addr); lb_s("\n"); lb_flush();
     return r == 0 ? addr : NULL;
 }
 
@@ -419,7 +399,8 @@ static bool resolve_input_libs(void)
     }
     bool kb_ok = p_kbInit && p_kbOpen && p_kbRead;
     bool m_ok  = p_mInit && p_mOpen && p_mRead;
-    kbm_log("[kbm_pad] funciones: teclado=%s raton=%s\n", kb_ok ? "OK" : "FALLO", m_ok ? "OK" : "FALLO");
+    lb_s("[kbm_pad] funciones: teclado="); lb_s(kb_ok ? "OK" : "FALLO");
+    lb_s(" raton="); lb_s(m_ok ? "OK" : "FALLO"); lb_s("\n"); lb_flush();
     if (!kb_ok) p_kbRead = NULL;
     if (!m_ok)  p_mRead = NULL;
     return kb_ok || m_ok;
@@ -439,7 +420,7 @@ static void ensure_input(void)
     sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
 
     if (!resolve_input_libs()) {
-        kbm_log("[kbm_pad] no se pudo resolver teclado ni raton\n");
+        L("[kbm_pad] no se pudo resolver teclado ni raton\n");
         notify("kbm_pad: no se pudo cargar teclado/raton");
         g_failed = true;
         return;
@@ -454,17 +435,21 @@ static void ensure_input(void)
         g_mouse = p_mOpen(user, 0, 0, NULL);
     }
 
-    kbm_log("[kbm_pad] user=%d keyboard=%d mouse=%d\n", user, g_kb, g_mouse);
+    lb_s("[kbm_pad] user="); lb_d(user); lb_s(" keyboard="); lb_d(g_kb);
+    lb_s(" mouse="); lb_d(g_mouse); lb_s("\n"); lb_flush();
 
     /* Se ejecuta en la primera llamada al hook: si este aviso sale, el hook
      * del mando SI se esta disparando. */
     char msg[96];
-    kbm_fmt(msg, sizeof(msg), "kbm_pad: teclado=%s, raton=%s",
-            g_kb >= 0 ? "OK" : "FALLO", g_mouse >= 0 ? "OK" : "FALLO");
+    msg[0] = 0;
+    kbm_cat(msg, sizeof(msg), "kbm_pad: teclado=");
+    kbm_cat(msg, sizeof(msg), g_kb >= 0 ? "OK" : "FALLO");
+    kbm_cat(msg, sizeof(msg), ", raton=");
+    kbm_cat(msg, sizeof(msg), g_mouse >= 0 ? "OK" : "FALLO");
     notify(msg);
 
     if (g_kb < 0 && g_mouse < 0) {
-        kbm_log("[kbm_pad] no se abrio ni teclado ni raton\n");
+        L("[kbm_pad] no se abrio ni teclado ni raton\n");
         g_failed = true;
         return;
     }
@@ -498,7 +483,7 @@ static void apply_kbm(KbmPadData *d)
     bool t = has_key(&kd, TOGGLE_KEYCODE);
     if (t && !g_toggle_down) {
         g_enabled = !g_enabled;
-        kbm_log("[kbm_pad] %s\n", g_enabled ? "ACTIVO" : "PAUSA");
+        L(g_enabled ? "[kbm_pad] ACTIVO\n" : "[kbm_pad] PAUSA\n");
         notify(g_enabled ? "kbm_pad ACTIVO" : "kbm_pad PAUSA");
     }
     g_toggle_down = t;
@@ -585,7 +570,7 @@ static void fake_pad(KbmPadData *d)
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     static bool seen;
-    if (!seen) { seen = true; kbm_log("[kbm_pad] hook scePadReadState: 1a llamada\n"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); }
     int32_t ret = HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
     ensure_input();
     if (!g_ready || data == NULL)
@@ -602,7 +587,7 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     static bool seen;
-    if (!seen) { seen = true; kbm_log("[kbm_pad] hook scePadRead: 1a llamada\n"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); }
     int32_t ret = HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
@@ -646,15 +631,15 @@ static void kbm_start(void)
     if (g_hooked)
         return;
     g_hooked = true;
-    kbm_log("[%s] cargado (%s, etapa %d, ancla=%s)\n", KBM_NAME,
-            kbm_relro_anchor[0], KBM_STAGE, kbm_relro_anchor[2]);
+    lb_s("["); lb_s(KBM_NAME); lb_s("] cargado ("); lb_s(kbm_relro_anchor[0]);
+    lb_s(", etapa "); lb_d(KBM_STAGE); lb_s(")\n"); lb_flush();
     notify(KBM_NAME " cargado");
 #if KBM_STAGE >= 2
-    kbm_log("[kbm_pad] enganchando scePadReadState...\n");
-    HOOK(scePadReadState);
-    kbm_log("[kbm_pad] enganchando scePadRead...\n");
-    HOOK(scePadRead);
-    kbm_log("[kbm_pad] enganches listos\n");
+    L("[kbm_pad] enganchando scePadReadState...\n");
+    HOOK32(scePadReadState);
+    L("[kbm_pad] enganchando scePadRead...\n");
+    HOOK32(scePadRead);
+    L("[kbm_pad] enganches listos\n");
 #endif
 }
 
@@ -667,7 +652,7 @@ static void kbm_stop(void)
     UNHOOK(scePadReadState);
     UNHOOK(scePadRead);
 #endif
-    kbm_log("[%s] descargado\n", KBM_NAME);
+    lb_s("["); lb_s(KBM_NAME); lb_s("] descargado\n"); lb_flush();
 }
 
 /* ------------------------------------------------------ ENTRY POINTS */
@@ -676,12 +661,15 @@ static void kbm_stop(void)
  * plugin_unload, NO da el plugin por cargado. Por eso se exportan con
  * visibilidad por defecto (no static). */
 __attribute__((visibility("default"))) const char *g_pluginName = KBM_NAME;
+__attribute__((visibility("default"))) const char *g_pluginDesc = "Teclado y raton USB como DualShock 4";
+__attribute__((visibility("default"))) const char *g_pluginAuth = "Y4ll";
+__attribute__((visibility("default"))) uint32_t g_pluginVersion = 0x00000100; /* 1.00 */
 
 __attribute__((visibility("default")))
 int plugin_load(int argc, const char *argv[])
 {
     (void)argc; (void)argv;
-    kbm_log("[kbm_pad] plugin_load llamado (%s)\n", KBM_BUILD);
+    lb_s("[kbm_pad] plugin_load llamado ("); lb_s(KBM_BUILD); lb_s(")\n"); lb_flush();
     kbm_start();
     return 0;   /* 0 = cargado; otro valor hace que el loader llame a plugin_unload */
 }
@@ -698,8 +686,8 @@ __attribute__((visibility("default")))
 int module_start(size_t argc, const void *args)
 {
     (void)argc; (void)args;
-    kbm_log("[kbm_pad] module_start llamado (%s)\n", KBM_BUILD);
-    kbm_start();
+    /* Como todos los plugins oficiales de GoldHEN: module_start no hace nada;
+     * el trabajo va en plugin_load (lo llama el plugin_loader despues). */
     return 0;
 }
 
