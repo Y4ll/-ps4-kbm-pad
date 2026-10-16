@@ -50,7 +50,12 @@ jobs:
             echo "right.sprx:"; find "$T" -name "right.sprx" 2>/dev/null | head -3
             echo "bin/data:"; ls "$T/bin/data" 2>&1 | head -20 | tr "\n" " "; echo
             echo "bin/linux:"; ls "$T/bin/linux" | head -20 | tr "\n" " "; echo
-            echo "uid:"; id -u' 2>&1 || true)
+            echo "uid:"; id -u
+            echo "libs c:"; ls "$T/lib" | grep -E "^(libc|crt|libkernel|libSceLibc)" | tr "\n" " "; echo
+            echo "crt1 undef:"; nm -u "$T/lib/crt1.o" 2>&1 | head -8 | tr "\n" " "; echo
+            echo "python:"; which python3 sh bash 2>&1 | tr "\n" " "; echo
+            echo "PkgTool:"; "$T/bin/linux/PkgTool.Core" 2>&1 | head -14 | tr "\n" "|"; echo
+            echo "template.gp4:"; head -c 1800 "$T/bin/data/template.gp4" | tr "\n" " "' 2>&1 || true)
           echo "::notice title=Toolchain info::$(printf '%s' "$info" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
 
       - name: Build kbm_pad.prx
