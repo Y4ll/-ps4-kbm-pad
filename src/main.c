@@ -87,8 +87,6 @@ extern int32_t scePadReadStateExt(int32_t handle, KbmPadData *data);
 #define ORBIS_KEYBOARD_MOD_LEFT_SHIFT  2
 #define ORBIS_KEYBOARD_MOD_RIGHT_CTRL  16
 #define ORBIS_KEYBOARD_MOD_RIGHT_SHIFT 32
-#define ORBIS_KEYBOARD_MOD_LEFT_ALT    4
-#define ORBIS_KEYBOARD_MOD_RIGHT_ALT   64
 #define ORBIS_KEYBOARD_KEY_F8          65
 
 typedef struct OrbisKeyboardData {
@@ -131,11 +129,6 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 #define K_W 26
 #define K_ENTER 40
 #define K_TAB   43
-#define K_ESC   41
-#define K_1     30
-#define K_2     31
-#define K_3     32
-#define K_4     33
 #define K_SPACE 44
 #define K_RIGHT 79
 #define K_LEFT  80
@@ -166,9 +159,6 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
-#define MOUSE_BTN_MIDDLE 0x4   /* supuesto: bit2 = rueda pulsada */
-#define MOUSE_BTN_BACK   0x8   /* supuesto: lateral 1 */
-#define MOUSE_BTN_FWD    0x10  /* supuesto: lateral 2 */
 
 #define KBM_BUILD "build-ext-1"   /* marca para saber que .prx esta cargado */
 
@@ -922,7 +912,7 @@ static void apply_kbm(KbmPadData *d)
     g_toggle_down = t;
 
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
-    int32_t dx = 0, dy = 0, dw = 0;
+    int32_t dx = 0, dy = 0;
     /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
      * sigue como estaba; antes se ponia a 0 y la mira (L2) se soltaba sola. */
     static uint32_t g_mbtn;
@@ -936,7 +926,6 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
-            dw += mb.m.wheel;
             if (mb.m.buttons != g_mbtn) {   /* diagnostico: aviso en cada cambio de botones */
                 static int g_btn_notices;
                 if (g_btn_notices < 16) {
@@ -1022,27 +1011,6 @@ static void apply_kbm(KbmPadData *d)
     if (has_key(&kd, K_LEFT))  d->buttons |= KBM_PAD_BUTTON_LEFT;
     if (has_key(&kd, K_RIGHT)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
 
-    /* Extras: 1-4 = cruceta (arriba, derecha, abajo, izquierda), Esc = Options, Alt = circulo */
-    if (has_key(&kd, K_1)) d->buttons |= KBM_PAD_BUTTON_UP;
-    if (has_key(&kd, K_2)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
-    if (has_key(&kd, K_3)) d->buttons |= KBM_PAD_BUTTON_DOWN;
-    if (has_key(&kd, K_4)) d->buttons |= KBM_PAD_BUTTON_LEFT;
-    if (has_key(&kd, K_ESC)) d->buttons |= KBM_PAD_BUTTON_OPTIONS;
-    if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_ALT | ORBIS_KEYBOARD_MOD_RIGHT_ALT))
-        d->buttons |= KBM_PAD_BUTTON_CIRCLE;
-
-    /* Raton extra: rueda = L1 (arriba) / R1 (abajo) en pulsos cortos; clic central = R3;
-     * lateral 1 = L3; lateral 2 = circulo. */
-    {
-        static int g_wheel_l1, g_wheel_r1;
-        if (dw > 0) g_wheel_l1 = 4;
-        if (dw < 0) g_wheel_r1 = 4;
-        if (g_wheel_l1 > 0) { g_wheel_l1--; d->buttons |= KBM_PAD_BUTTON_L1; }
-        if (g_wheel_r1 > 0) { g_wheel_r1--; d->buttons |= KBM_PAD_BUTTON_R1; }
-        if (mbtn & MOUSE_BTN_MIDDLE) d->buttons |= KBM_PAD_BUTTON_R3;
-        if (mbtn & MOUSE_BTN_BACK)   d->buttons |= KBM_PAD_BUTTON_L3;
-        if (mbtn & MOUSE_BTN_FWD)    d->buttons |= KBM_PAD_BUTTON_CIRCLE;
-    }
 }
 
 /* Rellena un KbmPadData neutro cuando no hay mando fisico. */
