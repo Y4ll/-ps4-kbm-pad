@@ -370,7 +370,7 @@ static void draw_all(const char *busy) {
     text(120, by, "[Cuadrado] Activar / desactivar modo teclado+raton", 3, S.prx ? C_TXT : C_DIM); by += 60;
     text(120, by, "[Triangulo] Desinstalar plugin", 3, S.prx ? C_TXT : C_DIM); by += 60;
     text(120, by, "[Circulo] Salir", 3, C_TXT);
-    text(120, 960, "En el juego: F7 modo conducir  |  F8 / F9 velocidad de camara  |  F10 pausar  |  F6 recargar", 2, C_ACC);
+    text(120, 960, "En el juego: F7 modo conducir  |  F9 / F10 velocidad de camara  |  F8 pausar  |  F6 recargar", 2, C_ACC);
     text(120, 1010, "Tras instalar o cambiar, abre el juego. Si el juego ya estaba abierto, cierralo y vuelve a abrirlo.", 2, C_DIM);
 }
 
