@@ -10,3 +10,4 @@ app/sce_module/
 app/sce_sys/param.sfo
 app/build.log
 !app/Media/jb.prx
+!dist/kbm_pad.prx

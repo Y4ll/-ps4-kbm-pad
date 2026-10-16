@@ -128,6 +128,25 @@ jobs:
               --notes "Version para auto-actualizacion. Commit: $GITHUB_SHA"
           fi
 
+      - name: Publish dist/kbm_pad.prx (descarga directa para la app)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # La app de la PS4 baja el plugin de raw.githubusercontent.com (sin redirecciones).
+          mkdir -p dist
+          cp kbm_pad.prx dist/kbm_pad.prx
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist/kbm_pad.prx
+          if git diff --cached --quiet; then
+            echo "dist/kbm_pad.prx sin cambios"
+          else
+            git commit -m "dist: kbm_pad.prx v$(tr -d '[:space:]' < VERSION)"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push origin HEAD:main && break
+              sleep 5
+            done
+          fi
+
       - name: Upload kbm_pad.prx
         uses: actions/upload-artifact@v4
         with:

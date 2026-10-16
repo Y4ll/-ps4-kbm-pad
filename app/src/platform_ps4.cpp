@@ -79,7 +79,7 @@ int plat_https_get(const char *url, char **out_buf, long *out_len, long max_len,
     if (h.req < 0) { snprintf(err, errcap, "peticion invalida (0x%08X)", (unsigned)h.req); h.req = 0; return -1; }
 
     int r = sceHttpSendRequest(h.req, NULL, 0);
-    if (r < 0) { snprintf(err, errcap, "sin respuesta (0x%08X): revisa tu internet", (unsigned)r); return -1; }
+    if (r < 0) { snprintf(err, errcap, "sin respuesta (0x%08X)", (unsigned)r); return -1; }
 
     int32_t status = 0;
     if (sceHttpGetStatusCode(h.req, &status) < 0) { snprintf(err, errcap, "respuesta HTTP invalida"); return -1; }

@@ -20,6 +20,8 @@
 #define REPO         "Y4ll/-ps4-kbm-pad"
 #define URL_VERSION  "https://raw.githubusercontent.com/" REPO "/main/VERSION"
 #define URL_RELEASE  "https://github.com/" REPO "/releases/download/v"
+// Archivo directo del repo: mismo servidor que VERSION (funciona en la PS4) y sin redirecciones.
+#define URL_PRX_RAW  "https://raw.githubusercontent.com/" REPO "/main/dist/kbm_pad.prx"
 
 // ---------------- dibujo ----------------
 static uint32_t *FB = 0;
@@ -297,19 +299,39 @@ static bool dl_cb(long done, long total, void *) {
     return true;
 }
 
+// Descarga `url` a PRX_TMP. Devuelve 200 si fue bien; si no, deja el motivo en err.
+static int download_prx(const char *url, char *err, size_t errcap) {
+    FILE *f = fopen(PRX_TMP, "wb");
+    if (!f) { snprintf(err, errcap, "no puedo escribir en %s", DIR_PLUGINS); return -2; }
+    g_dlDone = 0; g_dlTotal = -1;
+    int r = plat_https_get(url, NULL, NULL, 0, f, dl_cb, NULL, err, errcap);
+    fclose(f);
+    if (r != 200) plat_remove(PRX_TMP);
+    return r;
+}
+
 static bool install_plugin() {
-    if (!check_latest()) return false;
+    check_latest();  // solo informativo: si falla, igual se intenta la descarga
     plat_mkdir(DIR_GOLDHEN);
     plat_mkdir(DIR_PLUGINS);
-    char url[200];
-    snprintf(url, sizeof(url), URL_RELEASE "%d/kbm_pad.prx", S.latest);
-    FILE *f = fopen(PRX_TMP, "wb");
-    if (!f) { sayf(C_BAD, "No puedo escribir en %s (sin permisos?)", DIR_PLUGINS); return false; }
-    char err[160] = "";
-    g_dlDone = 0; g_dlTotal = -1;
-    int r = plat_https_get(url, NULL, NULL, 0, f, dl_cb, NULL, err, sizeof(err));
-    fclose(f);
-    if (r != 200) { plat_remove(PRX_TMP); sayf(C_BAD, "Descarga fallida: %s", err); return false; }
+    char err1[80] = "", err2[80] = "";
+    // 1) archivo directo del repo (el mismo servidor que ya responde para VERSION)
+    int r = download_prx(URL_PRX_RAW, err1, sizeof(err1));
+    // 2) respaldo: asset de la release (GitHub lo redirige a otro servidor)
+    if (r != 200 && S.latest > 0) {
+        char url[200];
+        snprintf(url, sizeof(url), URL_RELEASE "%d/kbm_pad.prx", S.latest);
+        r = download_prx(url, err2, sizeof(err2));
+    }
+    if (r != 200) {
+        // Si ya habia un plugin instalado, al menos se deja listado en plugins.ini.
+        long old = 0;
+        bool listed = exists(PRX_PATH, &old) && old >= 4096 && plugins_ini_add();
+        snprintf(g_msg, sizeof(g_msg), "Descarga fallida: %s%s%s%s", err1,
+                 err2[0] ? " | " : "", err2, listed ? " - el plugin instalado ya esta en plugins.ini" : "");
+        g_msgCol = C_BAD;
+        return false;
+    }
     long sz = 0;
     if (!exists(PRX_TMP, &sz) || sz < 4096) { plat_remove(PRX_TMP); say(C_BAD, "El archivo descargado no es valido"); return false; }
     plat_remove(PRX_PATH);
@@ -594,7 +616,8 @@ int main() {
             plat_present();
             if (install_plugin()) {
                 if (!had) { ini_set_activo(1); }
-                sayd(C_OK, had ? "Plugin actualizado a v%d" : "Plugin instalado: v%d (activado)", S.latest);
+                if (S.latest > 0) sayd(C_OK, had ? "Plugin actualizado a v%d" : "Plugin instalado: v%d (activado)", S.latest);
+                else say(C_OK, had ? "Plugin actualizado" : "Plugin instalado (activado)");
             }
             refresh();
         }
