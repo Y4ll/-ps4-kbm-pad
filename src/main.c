@@ -629,7 +629,10 @@ static void apply_kbm(KbmPadData *d)
 
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
     int32_t dx = 0, dy = 0;
-    uint32_t mbtn = 0;
+    /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
+     * sigue como estaba; antes se ponia a 0 y la mira (L2) se soltaba sola. */
+    static uint32_t g_mbtn;
+    uint32_t mbtn;
     if (g_mouse >= 0 && p_mRead) {
         for (int i = 0; i < 8; i++) {
             KbmMouseBuf mb;
@@ -639,9 +642,10 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
-            mbtn = mb.m.buttons;
+            g_mbtn = mb.m.buttons;
         }
     }
+    mbtn = g_mbtn;
 
     if (!g_enabled)
         return;
