@@ -52,7 +52,8 @@ jobs:
       - name: Publicar PKG en Releases (tag manager)
         run: |
           cp app/*.pkg kbm_manager.pkg
+          cp app/*.pkg "kbm_manager_v$APP_VER.pkg"
           gh release delete manager --cleanup-tag -y || true
-          gh release create manager kbm_manager.pkg --target "$GITHUB_SHA" \
+          gh release create manager kbm_manager.pkg "kbm_manager_v$APP_VER.pkg" --target "$GITHUB_SHA" \
             --title "kbm_manager (app PKG)" \
-            --notes "App para PS4: descarga el plugin kbm_pad y lo activa/desactiva. Version $APP_VER. Commit: $GITHUB_SHA"
+            --notes "App para PS4: descarga el plugin kbm_pad y lo activa/desactiva. Version $APP_VER (usa kbm_manager_v$APP_VER.pkg: el nombre cambia con cada version para no confundir descargas viejas). Commit: $GITHUB_SHA"
