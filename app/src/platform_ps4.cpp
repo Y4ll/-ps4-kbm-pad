@@ -126,7 +126,8 @@ int plat_https_get(const char *url, char **out_buf, long *out_len, long max_len,
         ok = false;
     }
     if (!ok) { free(buf); return -1; }
-    if (out_buf) { buf[got] = 0; *out_buf = buf; *out_len = got; }
+    if (out_buf) { buf[got] = 0; *out_buf = buf; }
+    if (out_len) *out_len = got;  // tambien al guardar en archivo: bytes realmente descargados
     return 200;
 }
 

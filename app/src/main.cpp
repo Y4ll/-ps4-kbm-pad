@@ -300,40 +300,56 @@ static bool dl_cb(long done, long total, void *) {
 }
 
 // Descarga `url` a PRX_TMP. Devuelve 200 si fue bien; si no, deja el motivo en err.
-static int download_prx(const char *url, char *err, size_t errcap) {
+// `bytes` recibe los bytes realmente escritos (no depende de stat).
+static int download_prx(const char *url, long *bytes, char *err, size_t errcap) {
     FILE *f = fopen(PRX_TMP, "wb");
     if (!f) { snprintf(err, errcap, "no puedo escribir en %s", DIR_PLUGINS); return -2; }
     g_dlDone = 0; g_dlTotal = -1;
-    int r = plat_https_get(url, NULL, NULL, 0, f, dl_cb, NULL, err, errcap);
-    fclose(f);
+    long got = 0;
+    int r = plat_https_get(url, NULL, &got, 0, f, dl_cb, NULL, err, errcap);
+    if (fclose(f) != 0 && r == 200) { snprintf(err, errcap, "error al guardar el archivo"); r = -3; }
+    if (bytes) *bytes = got;
     if (r != 200) plat_remove(PRX_TMP);
     return r;
+}
+
+// Un .prx de PS4 empieza por la firma SELF 4F 15 3D 1D. Se lee con libc (la via con la que se escribio).
+static bool prx_header_ok(const char *path, unsigned char h[4]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(h, 1, 4, f);
+    fclose(f);
+    return n == 4 && h[0] == 0x4F && h[1] == 0x15 && h[2] == 0x3D && h[3] == 0x1D;
 }
 
 static bool install_plugin() {
     check_latest();  // solo informativo: si falla, igual se intenta la descarga
     plat_mkdir(DIR_GOLDHEN);
     plat_mkdir(DIR_PLUGINS);
-    char err1[80] = "", err2[80] = "";
     // 1) archivo directo del repo (el mismo servidor que ya responde para VERSION)
-    int r = download_prx(URL_PRX_RAW, err1, sizeof(err1));
     // 2) respaldo: asset de la release (GitHub lo redirige a otro servidor)
-    if (r != 200 && S.latest > 0) {
-        char url[200];
-        snprintf(url, sizeof(url), URL_RELEASE "%d/kbm_pad.prx", S.latest);
-        r = download_prx(url, err2, sizeof(err2));
+    char rel[200] = "";
+    if (S.latest > 0) snprintf(rel, sizeof(rel), URL_RELEASE "%d/kbm_pad.prx", S.latest);
+    const char *urls[2] = { URL_PRX_RAW, rel[0] ? rel : NULL };
+    char errs[2][80] = { "", "" };
+    bool got_ok = false;
+    for (int i = 0; i < 2 && !got_ok; i++) {
+        if (!urls[i]) continue;
+        long bytes = 0;
+        if (download_prx(urls[i], &bytes, errs[i], sizeof(errs[i])) != 200) continue;
+        unsigned char hd[4] = {0, 0, 0, 0};
+        if (bytes >= 4096 && prx_header_ok(PRX_TMP, hd)) { got_ok = true; break; }
+        snprintf(errs[i], sizeof(errs[i]), "archivo no valido (%ld bytes, %02X%02X%02X%02X)", bytes, hd[0], hd[1], hd[2], hd[3]);
+        plat_remove(PRX_TMP);
     }
-    if (r != 200) {
+    if (!got_ok) {
         // Si ya habia un plugin instalado, al menos se deja listado en plugins.ini.
-        long old = 0;
-        bool listed = exists(PRX_PATH, &old) && old >= 4096 && plugins_ini_add();
-        snprintf(g_msg, sizeof(g_msg), "Descarga fallida: %s%s%s%s", err1,
-                 err2[0] ? " | " : "", err2, listed ? " - el plugin instalado ya esta en plugins.ini" : "");
+        bool listed = exists(PRX_PATH) && plugins_ini_add();
+        snprintf(g_msg, sizeof(g_msg), "Descarga fallida: %s%s%s%s", errs[0],
+                 errs[1][0] ? " | " : "", errs[1], listed ? " - el plugin instalado ya esta en plugins.ini" : "");
         g_msgCol = C_BAD;
         return false;
     }
-    long sz = 0;
-    if (!exists(PRX_TMP, &sz) || sz < 4096) { plat_remove(PRX_TMP); say(C_BAD, "El archivo descargado no es valido"); return false; }
     plat_remove(PRX_PATH);
     if (plat_rename(PRX_TMP, PRX_PATH) != 0) { say(C_BAD, "No pude guardar kbm_pad.prx"); return false; }
     if (!plugins_ini_add()) { say(C_BAD, "Plugin guardado, pero no pude editar plugins.ini"); return false; }
