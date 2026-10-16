@@ -39,8 +39,12 @@ endif
 FSELF ?= $(TOOLCHAIN)/bin/$(CDIR)/create-fself
 
 PROBE      := kbm_probe.prx
+PROBE_A    := kbm_probe_a.prx
+PROBE_B    := kbm_probe_b.prx
+PROBE_LDFLAGS := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \
+                 --export-dynamic --eh-frame-hdr -L$(TOOLCHAIN)/lib
 
-all: $(TARGET) $(PROBE)
+all: $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B)
 
 $(INTDIR):
 	@mkdir -p $(INTDIR)
@@ -71,7 +75,27 @@ $(PROBE): $(CRT_OBJ) $(INTDIR)/probe_probe.o
 	$(FSELF) -in=$(INTDIR)/kbm_probe.elf \
 	  -out=$(INTDIR)/kbm_probe.oelf --lib=$(PROBE) --paid 0x3800000000000011
 
+# Variante A: probe + las mismas librerias de sistema que kbm_pad (Pad, UserService, Sysmodule)
+$(INTDIR)/probe_a.o: probe/probe.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DPROBE_VARIANT=1 -o $@ $<
+
+$(PROBE_A): $(CRT_OBJ) $(INTDIR)/probe_a.o
+	$(LD) $(INTDIR)/probe_a.o $(CRT_OBJ) -o $(INTDIR)/kbm_probe_a.elf \
+	  $(PROBE_LDFLAGS) -lkernel -lSceLibcInternal -lSceSysmodule -lSceUserService -lScePad
+	$(FSELF) -in=$(INTDIR)/kbm_probe_a.elf \
+	  -out=$(INTDIR)/kbm_probe_a.oelf --lib=$(PROBE_A) --paid 0x3800000000000011
+
+# Variante B: probe + los objetos del SDK (Detour, Patcher, HDE64, ...) sin librerias extra
+$(INTDIR)/probe_b.o: probe/probe.c | $(INTDIR)
+	$(CC) $(CFLAGS) -DPROBE_VARIANT=2 -o $@ $<
+
+$(PROBE_B): $(CRT_OBJ) $(INTDIR)/probe_b.o $(filter $(INTDIR)/sdk_%.o,$(OBJS))
+	$(LD) $(INTDIR)/probe_b.o $(filter $(INTDIR)/sdk_%.o,$(OBJS)) $(CRT_OBJ) \
+	  -o $(INTDIR)/kbm_probe_b.elf $(PROBE_LDFLAGS) -lkernel -lSceLibcInternal
+	$(FSELF) -in=$(INTDIR)/kbm_probe_b.elf \
+	  -out=$(INTDIR)/kbm_probe_b.oelf --lib=$(PROBE_B) --paid 0x3800000000000011
+
 clean:
-	rm -rf $(INTDIR) $(TARGET) $(PROBE)
+	rm -rf $(INTDIR) $(TARGET) $(PROBE) $(PROBE_A) $(PROBE_B)
 
 .PHONY: all clean

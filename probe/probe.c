@@ -1,16 +1,31 @@
 /*
- * kbm_probe - plugin GoldHEN minimo de diagnostico (v2).
+ * kbm_probe - plugin GoldHEN minimo de diagnostico (v3).
  *
- * Solo depende de libkernel. En module_start y plugin_load:
- *   1) muestra un aviso en pantalla (si sale, el plugin SI se cargo);
- *   2) escribe una linea en varios archivos, por si el juego no puede escribir
- *      en alguna de las carpetas (si aparece alguno, el plugin SI se cargo).
- * Si no sale ninguna de las dos cosas, el plugin no se esta ejecutando.
+ * Variantes (se eligen con -DPROBE_VARIANT=n desde el Makefile):
+ *   0  kbm_probe    solo libkernel / libc (sabemos que carga)
+ *   1  kbm_probe_a  igual + enlaza Pad, UserService y Sysmodule como kbm_pad
+ *   2  kbm_probe_b  igual + enlaza los objetos del SDK (Detour, Patcher...)
+ *
+ * En module_start y plugin_load muestra un aviso en pantalla y escribe una
+ * linea en /data/GoldHEN/kbm_probe.log (y otras rutas). Si una variante no da
+ * aviso ni log, lo que le anadimos es lo que impide cargar el modulo.
  */
 #include <stdint.h>
 #include <stddef.h>
 
-#define PROBE_BUILD "probe-v2"
+#define PROBE_BUILD "probe-v3"
+
+#ifndef PROBE_VARIANT
+#define PROBE_VARIANT 0
+#endif
+
+#if PROBE_VARIANT == 1
+#define PROBE_NAME "kbm_probe_a"
+#elif PROBE_VARIANT == 2
+#define PROBE_NAME "kbm_probe_b"
+#else
+#define PROBE_NAME "kbm_probe"
+#endif
 
 extern int32_t probe_open(const char *path, int32_t flags, int32_t mode)
     __asm__("sceKernelOpen");
@@ -18,6 +33,22 @@ extern int64_t probe_write(int32_t fd, const void *buf, size_t n)
     __asm__("sceKernelWrite");
 extern int32_t probe_close(int32_t fd)
     __asm__("sceKernelClose");
+
+#if PROBE_VARIANT == 1
+/* Fuerza las mismas importaciones de libreria que kbm_pad (no se llaman). */
+extern int32_t scePadReadState(int32_t handle, void *data);
+extern int32_t sceUserServiceGetInitialUser(int32_t *userId);
+extern int32_t sceSysmoduleLoadModule(uint16_t id);
+static void *volatile probe_refs[3];
+static void probe_touch(void)
+{
+    probe_refs[0] = (void *)scePadReadState;
+    probe_refs[1] = (void *)sceUserServiceGetInitialUser;
+    probe_refs[2] = (void *)sceSysmoduleLoadModule;
+}
+#else
+static void probe_touch(void) {}
+#endif
 
 /* Misma estructura de aviso que kbm_pad (3120 bytes, target_id = -1). */
 typedef struct ProbeNotify {
@@ -89,14 +120,14 @@ static void probe_log(const char *msg)
     }
 }
 
-__attribute__((visibility("default"))) const char *g_pluginName = "kbm_probe";
+__attribute__((visibility("default"))) const char *g_pluginName = PROBE_NAME;
 
 __attribute__((visibility("default")))
 int plugin_load(int argc, const char *argv[])
 {
     (void)argc; (void)argv;
-    probe_log("[kbm_probe " PROBE_BUILD "] plugin_load llamado\n");
-    probe_notify("kbm_probe: plugin_load OK");
+    probe_log("[" PROBE_NAME " " PROBE_BUILD "] plugin_load llamado\n");
+    probe_notify(PROBE_NAME ": plugin_load OK");
     return 0;
 }
 
@@ -104,7 +135,7 @@ __attribute__((visibility("default")))
 int plugin_unload(int argc, const char *argv[])
 {
     (void)argc; (void)argv;
-    probe_log("[kbm_probe " PROBE_BUILD "] plugin_unload llamado\n");
+    probe_log("[" PROBE_NAME " " PROBE_BUILD "] plugin_unload llamado\n");
     return 0;
 }
 
@@ -112,8 +143,9 @@ __attribute__((visibility("default")))
 int module_start(size_t argc, const void *args)
 {
     (void)argc; (void)args;
-    probe_log("[kbm_probe " PROBE_BUILD "] module_start llamado\n");
-    probe_notify("kbm_probe: module_start OK");
+    probe_touch();
+    probe_log("[" PROBE_NAME " " PROBE_BUILD "] module_start llamado\n");
+    probe_notify(PROBE_NAME ": module_start OK");
     return 0;
 }
 
@@ -121,6 +153,6 @@ __attribute__((visibility("default")))
 int module_stop(size_t argc, const void *args)
 {
     (void)argc; (void)args;
-    probe_log("[kbm_probe " PROBE_BUILD "] module_stop llamado\n");
+    probe_log("[" PROBE_NAME " " PROBE_BUILD "] module_stop llamado\n");
     return 0;
 }

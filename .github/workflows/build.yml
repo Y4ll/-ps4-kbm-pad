@@ -81,4 +81,6 @@ jobs:
           path: |
             kbm_pad.prx
             kbm_probe.prx
+            kbm_probe_a.prx
+            kbm_probe_b.prx
           if-no-files-found: error
