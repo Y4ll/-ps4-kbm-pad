@@ -1,5 +1,14 @@
 # kbm_pad — teclado y ratón como mando (plugin GoldHEN)
 
+<p align="center">
+  <img src="app/sce_sys/icon0.png" width="160" alt="kbm_manager">
+</p>
+
+<p align="center">
+  <b>kbm_manager</b> — app PKG para instalar y activar el plugin desde la PS4<br>
+  <a href="https://github.com/Y4ll/-ps4-kbm-pad/releases/download/manager/kbm_manager.pkg"><b>⬇ Descargar kbm_manager.pkg</b></a>
+</p>
+
 Plugin `.prx` para GoldHEN que engancha `scePadRead` / `scePadReadState` del juego
 y mezcla en los datos del mando las entradas de un teclado y un ratón USB.
 
