@@ -19,6 +19,11 @@
 #include "Detour.h"
 #include "Utilities.h"
 
+/* El HOOK() del SDK imprime con klog (= printf de libc). Se redirige al registro
+ * propio, que no usa libc. */
+#undef klog
+#define klog kbm_log
+
 /* ------------------------------------------------- MANDO (sin header) */
 /* El layout de KbmPadData cambia entre releases de OpenOrbis; aqui va el
  * de la rama master (el real de ScePadData). Importa el orden y el tamano. */
@@ -145,7 +150,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-dyn-2"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-nolibc-3"   /* marca para saber que .prx esta cargado */
 
 /* ------------------------------------------------- REGISTRO A ARCHIVO */
 /* Sin klog ni PC: el plugin escribe /data/GoldHEN/kbm_pad.log (se abre por
@@ -163,12 +168,120 @@ extern int64_t kbm_sys_write(int32_t fd, const void *buf, size_t n)
 extern int32_t kbm_sys_close(int32_t fd)
     __asm__("sceKernelClose");
 
+/* Formateo y copia SIN funciones de libc. El plugin de prueba (que no usa libc)
+ * si mostraba avisos y escribia logs dentro del juego; kbm_pad, que usaba
+ * snprintf/vsnprintf/memset, no. Por eso todo lo que se muestra o se registra
+ * se arma aqui con codigo propio. Soporta %s %d %u %x %p %%. */
+static void kbm_zero(void *p, size_t n)
+{
+    unsigned char *b = (unsigned char *)p;
+    for (size_t i = 0; i < n; i++)
+        b[i] = 0;
+}
+
+static void kbm_copy(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0;
+    while (src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static size_t kbm_put(char *buf, size_t cap, size_t pos, char c)
+{
+    if (pos + 1 < cap)
+        buf[pos] = c;
+    return pos + 1;
+}
+
+static size_t kbm_putu(char *buf, size_t cap, size_t pos, uint64_t v, unsigned base)
+{
+    char tmp[24];
+    int n = 0;
+    if (v == 0)
+        tmp[n++] = '0';
+    while (v) {
+        unsigned d = (unsigned)(v % base);
+        tmp[n++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
+        v /= base;
+    }
+    while (n)
+        pos = kbm_put(buf, cap, pos, tmp[--n]);
+    return pos;
+}
+
+static int kbm_vfmt(char *buf, size_t cap, const char *fmt, va_list ap)
+{
+    size_t pos = 0;
+    for (; *fmt; fmt++) {
+        if (*fmt != '%') {
+            pos = kbm_put(buf, cap, pos, *fmt);
+            continue;
+        }
+        fmt++;
+        if (!*fmt)
+            break;
+        switch (*fmt) {
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            if (!s)
+                s = "(null)";
+            while (*s)
+                pos = kbm_put(buf, cap, pos, *s++);
+            break;
+        }
+        case 'd': {
+            int32_t v = va_arg(ap, int);
+            if (v < 0) {
+                pos = kbm_put(buf, cap, pos, '-');
+                pos = kbm_putu(buf, cap, pos, (uint64_t)(-(int64_t)v), 10);
+            } else {
+                pos = kbm_putu(buf, cap, pos, (uint64_t)v, 10);
+            }
+            break;
+        }
+        case 'u':
+            pos = kbm_putu(buf, cap, pos, va_arg(ap, unsigned), 10);
+            break;
+        case 'x':
+            pos = kbm_putu(buf, cap, pos, va_arg(ap, unsigned), 16);
+            break;
+        case 'p':
+            pos = kbm_put(buf, cap, pos, '0');
+            pos = kbm_put(buf, cap, pos, 'x');
+            pos = kbm_putu(buf, cap, pos, (uint64_t)(uintptr_t)va_arg(ap, void *), 16);
+            break;
+        case '%':
+            pos = kbm_put(buf, cap, pos, '%');
+            break;
+        default:
+            pos = kbm_put(buf, cap, pos, '%');
+            pos = kbm_put(buf, cap, pos, *fmt);
+            break;
+        }
+    }
+    if (cap)
+        buf[pos < cap ? pos : cap - 1] = 0;
+    return (int)pos;
+}
+
+static int kbm_fmt(char *buf, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = kbm_vfmt(buf, cap, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
 static void kbm_log(const char *fmt, ...)
 {
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    int n = kbm_vfmt(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     if (n <= 0)
         return;
@@ -179,7 +292,6 @@ static void kbm_log(const char *fmt, ...)
         kbm_sys_write(fd, buf, (size_t)n);
         kbm_sys_close(fd);
     }
-    printf("%s", buf);   /* y tambien al klog */
 }
 
 /* ------------------------------------------------- NOTIFICACIONES */
@@ -217,12 +329,12 @@ extern int32_t kbm_send_notification(int32_t device, KbmNotifyRequest *req,
 static void notify(const char *msg)
 {
     KbmNotifyRequest req;
-    memset(&req, 0, sizeof(req));
+    kbm_zero(&req, sizeof(req));
     req.type = 0;
     req.target_id = -1;
     req.use_icon_image_uri = 1;
-    snprintf(req.message, sizeof(req.message), "%s", msg);
-    snprintf(req.icon_image_uri, sizeof(req.icon_image_uri), "%s",
+    kbm_copy(req.message, sizeof(req.message), msg);
+    kbm_copy(req.icon_image_uri, sizeof(req.icon_image_uri),
              "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
     kbm_log("[kbm_pad] aviso \"%s\" -> %d\n", msg, r);
@@ -323,8 +435,8 @@ static void ensure_input(void)
     /* Se ejecuta en la primera llamada al hook: si este aviso sale, el hook
      * del mando SI se esta disparando. */
     char msg[96];
-    snprintf(msg, sizeof(msg), "kbm_pad: teclado=%s, raton=%s",
-             g_kb >= 0 ? "OK" : "FALLO", g_mouse >= 0 ? "OK" : "FALLO");
+    kbm_fmt(msg, sizeof(msg), "kbm_pad: teclado=%s, raton=%s",
+            g_kb >= 0 ? "OK" : "FALLO", g_mouse >= 0 ? "OK" : "FALLO");
     notify(msg);
 
     if (g_kb < 0 && g_mouse < 0) {
@@ -354,9 +466,9 @@ static uint8_t to_axis(float v)   /* -1..1 -> 0..255 */
 static void apply_kbm(KbmPadData *d)
 {
     OrbisKeyboardData kd;
-    memset(&kd, 0, sizeof(kd));
+    kbm_zero(&kd, sizeof(kd));
     if (g_kb >= 0 && p_kbRead && p_kbRead(g_kb, &kd) < 0)
-        memset(&kd, 0, sizeof(kd));
+        kbm_zero(&kd, sizeof(kd));
 
     /* Toggle con F8 (flanco de subida) */
     bool t = has_key(&kd, TOGGLE_KEYCODE);
@@ -373,7 +485,7 @@ static void apply_kbm(KbmPadData *d)
     if (g_mouse >= 0 && p_mRead) {
         for (int i = 0; i < 8; i++) {
             KbmMouseBuf mb;
-            memset(&mb, 0, sizeof(mb));
+            kbm_zero(&mb, sizeof(mb));
             int32_t n = p_mRead(g_mouse, &mb, 1);
             if (n <= 0)
                 break;
@@ -437,7 +549,7 @@ static void apply_kbm(KbmPadData *d)
 /* Rellena un KbmPadData neutro cuando no hay mando fisico. */
 static void fake_pad(KbmPadData *d)
 {
-    memset(d, 0, sizeof(*d));
+    kbm_zero(d, sizeof(*d));
     d->leftStick.x = d->leftStick.y = 128;
     d->rightStick.x = d->rightStick.y = 128;
     d->orientation.w = 1.0f;
