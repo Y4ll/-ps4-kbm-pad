@@ -37,6 +37,12 @@ jobs:
       - name: Compilar PKG
         run: make -C app VERSION="$APP_VER" 2>&1 | tee app/build.log; exit ${PIPESTATUS[0]}
 
+      - name: Mostrar errores de compilacion
+        if: failure()
+        run: |
+          grep -nE 'error|undefined|ERROR|No such|not found|cannot|Error' app/build.log | head -15 | while IFS= read -r l; do echo "::error::${l:0:400}"; done
+          echo "::error::ULTIMAS: $(tail -n 8 app/build.log | tr '\n' '|' | cut -c1-600)"
+
       - name: Subir PKG como artefacto
         uses: actions/upload-artifact@v4
         with:

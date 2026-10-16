@@ -39,6 +39,9 @@ const char *plat_apptmp_dir();    // carpeta donde Minecraft monta sus datos mie
 
 // Existe la ruta? Si existe, dice si es carpeta y su tamano en bytes.
 bool plat_stat(const char *path, bool *isDir, long *size);
+int plat_mkdir(const char *path);                       // 0 = ok (o ya existia)
+int plat_remove(const char *path);                      // borra un archivo
+int plat_rename(const char *from, const char *to);      // 0 = ok
 
 // Lista los nombres de una carpeta (sin "." ni ".."). Devuelve false si no se pudo abrir.
 typedef void (*PlatDirCb)(const char *name, void *ctx);

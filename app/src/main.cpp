@@ -4,7 +4,6 @@
 #include "font.h"
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #ifndef APP_VERSION
 #define APP_VERSION "1.00"
@@ -114,7 +113,7 @@ static int ini_get_int(const char *txt, const char *key) {
 
 // Pone activo=<v> en kbm_pad.ini conservando el resto del archivo.
 static bool ini_set_activo(int v) {
-    mkdir(DIR_GOLDHEN, 0777);
+    plat_mkdir(DIR_GOLDHEN);
     long n = 0;
     char *old = read_file(KBM_INI, &n);
     size_t cap = (size_t)n + 64;
@@ -174,7 +173,7 @@ static bool plugins_ini_has() {
 // Anade la ruta del plugin justo debajo de [default] sin tocar nada mas.
 static bool plugins_ini_add() {
     if (plugins_ini_has()) return true;
-    mkdir(DIR_GOLDHEN, 0777);
+    plat_mkdir(DIR_GOLDHEN);
     long n = 0;
     char *old = read_file(PLUGINS_INI, &n);
     size_t cap = (size_t)n + 128;
@@ -299,8 +298,8 @@ static bool dl_cb(long done, long total, void *) {
 
 static bool install_plugin() {
     if (!check_latest()) return false;
-    mkdir(DIR_GOLDHEN, 0777);
-    mkdir(DIR_PLUGINS, 0777);
+    plat_mkdir(DIR_GOLDHEN);
+    plat_mkdir(DIR_PLUGINS);
     char url[200];
     snprintf(url, sizeof(url), URL_RELEASE "%d/kbm_pad.prx", S.latest);
     FILE *f = fopen(PRX_TMP, "wb");
@@ -309,19 +308,19 @@ static bool install_plugin() {
     g_dlDone = 0; g_dlTotal = -1;
     int r = plat_https_get(url, NULL, NULL, 0, f, dl_cb, NULL, err, sizeof(err));
     fclose(f);
-    if (r != 200) { remove(PRX_TMP); sayf(C_BAD, "Descarga fallida: %s", err); return false; }
+    if (r != 200) { plat_remove(PRX_TMP); sayf(C_BAD, "Descarga fallida: %s", err); return false; }
     long sz = 0;
-    if (!exists(PRX_TMP, &sz) || sz < 4096) { remove(PRX_TMP); say(C_BAD, "El archivo descargado no es valido"); return false; }
-    remove(PRX_PATH);
-    if (rename(PRX_TMP, PRX_PATH) != 0) { say(C_BAD, "No pude guardar kbm_pad.prx"); return false; }
+    if (!exists(PRX_TMP, &sz) || sz < 4096) { plat_remove(PRX_TMP); say(C_BAD, "El archivo descargado no es valido"); return false; }
+    plat_remove(PRX_PATH);
+    if (plat_rename(PRX_TMP, PRX_PATH) != 0) { say(C_BAD, "No pude guardar kbm_pad.prx"); return false; }
     if (!plugins_ini_add()) { say(C_BAD, "Plugin guardado, pero no pude editar plugins.ini"); return false; }
     return true;
 }
 
 static void uninstall_plugin() {
     plugins_ini_remove();
-    remove(PRX_PATH);
-    remove(KBM_STATUS);
+    plat_remove(PRX_PATH);
+    plat_remove(KBM_STATUS);
     say(C_WARN, "Plugin desinstalado (kbm_pad.ini se conserva).");
 }
 

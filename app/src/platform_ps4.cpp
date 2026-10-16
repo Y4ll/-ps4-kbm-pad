@@ -238,6 +238,10 @@ bool plat_stat(const char *path, bool *isDir, long *size) {
     return true;
 }
 
+int plat_mkdir(const char *path) { return sceKernelMkdir(path, 0777) < 0 ? -1 : 0; }
+int plat_remove(const char *path) { return sceKernelUnlink(path) < 0 ? -1 : 0; }
+int plat_rename(const char *from, const char *to) { return sceKernelRename(from, to) < 0 ? -1 : 0; }
+
 // Listado de carpetas con las llamadas del kernel (la PS4 es FreeBSD 9: struct dirent antigua).
 bool plat_listdir(const char *path, PlatDirCb cb, void *ctx) {
     int fd = sceKernelOpen(path, 0x00020000 /* O_RDONLY | O_DIRECTORY */, 0);
