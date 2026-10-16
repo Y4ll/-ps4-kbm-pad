@@ -115,6 +115,7 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 #define MOUSE_DECAY     0.55f   /* 0 = sin inercia, 0.9 = mucha inercia */
 #define INVERT_MOUSE_Y  0       /* 1 = invertir eje Y del raton         */
 #define TOGGLE_KEYCODE  ORBIS_KEYBOARD_KEY_F8   /* activar / pausar     */
+#define AIM_TOGGLE      1       /* 1 = clic derecho alterna la mira (L2); 0 = mantener */
 
 /* Codigos USB HID (los mismos que usa OrbisKeyboardData.keycodes) */
 #define K_A 4
@@ -675,7 +676,18 @@ static void apply_kbm(KbmPadData *d)
 
     /* Gatillos: clic izq = R2, clic der = L2 */
     if (mbtn & MOUSE_BTN_LEFT)  { d->buttons |= KBM_PAD_BUTTON_R2; d->analogButtons.r2 = 255; }
+#if AIM_TOGGLE
+    {   /* un clic activa la mira, otro clic la quita (no hace falta mantener) */
+        static bool g_aim_on, g_right_prev;
+        bool right = (mbtn & MOUSE_BTN_RIGHT) != 0;
+        if (right && !g_right_prev)
+            g_aim_on = !g_aim_on;
+        g_right_prev = right;
+        if (g_aim_on) { d->buttons |= KBM_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
+    }
+#else
     if (mbtn & MOUSE_BTN_RIGHT) { d->buttons |= KBM_PAD_BUTTON_L2; d->analogButtons.l2 = 255; }
+#endif
 
     /* Botones */
     if (has_key(&kd, K_SPACE)) d->buttons |= KBM_PAD_BUTTON_CROSS;
