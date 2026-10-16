@@ -112,7 +112,8 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 
 /* ------------------------------------------------------------ CONFIG */
 #define MOUSE_SENS      6.0f    /* sube = stick derecho mas sensible   */
-#define MOUSE_DECAY     0.55f   /* 0 = sin inercia, 0.9 = mucha inercia */
+#define MOUSE_DECAY     0.40f   /* 0 = sin inercia, 0.9 = mucha inercia */
+#define MOUSE_DEADZONE  0.15f   /* zona muerta del stick del juego que se salta el raton */
 #define INVERT_MOUSE_Y  0       /* 1 = invertir eje Y del raton         */
 #define TOGGLE_KEYCODE  ORBIS_KEYBOARD_KEY_F8   /* activar / pausar     */
 #define AIM_TOGGLE      0       /* 1 = clic derecho alterna la mira (L2); 0 = mantener */
@@ -894,6 +895,19 @@ static uint8_t to_axis(float v)   /* -1..1 -> 0..255 */
     return (uint8_t)(128.0f + v * 127.0f);
 }
 
+/* Salta la zona muerta del juego: 0 se queda en 0; cualquier otro valor arranca en
+ * MOUSE_DEADZONE y llega a 1.0. */
+static float comp_deadzone(float v)
+{
+    if (v > -0.02f && v < 0.02f)
+        return 0.0f;
+    float a = v < 0.0f ? -v : v;
+    if (a > 1.0f)
+        a = 1.0f;
+    a = MOUSE_DEADZONE + a * (1.0f - MOUSE_DEADZONE);
+    return v < 0.0f ? -a : a;
+}
+
 /* Mezcla teclado + raton en un KbmPadData. */
 static void apply_kbm(KbmPadData *d)
 {
@@ -918,17 +932,22 @@ static void apply_kbm(KbmPadData *d)
     static uint32_t g_mbtn;
     uint32_t mbtn;
     if (g_mouse >= 0 && p_mRead) {
-        for (int i = 0; i < 8; i++) {
+        int drained = 0;
+        /* Se leen TODAS las muestras pendientes (hasta 256). Con solo 8 por lectura,
+         * un raton rapido llenaba la cola: movimiento a saltos y clics que llegaban
+         * tarde o se perdian (no se podia mantener pulsado). */
+        for (int i = 0; i < 256; i++) {
             KbmMouseBuf mb;
             kbm_zero(&mb, sizeof(mb));
             int32_t n = p_mRead(g_mouse, &mb, 1);
             if (n <= 0)
                 break;
+            drained++;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
             if (mb.m.buttons != g_mbtn) {   /* diagnostico: aviso en cada cambio de botones */
                 static int g_btn_notices;
-                if (g_btn_notices < 16) {
+                if (g_btn_notices < 8) {
                     g_btn_notices++;
                     char m[64];
                     m[0] = 0;
@@ -946,6 +965,18 @@ static void apply_kbm(KbmPadData *d)
                 }
             }
             g_mbtn = mb.m.buttons;
+        }
+        {   /* diagnostico (una sola vez): confirma que habia cola acumulada */
+            static bool g_backlog_notified;
+            if (drained > 8 && !g_backlog_notified) {
+                g_backlog_notified = true;
+                char m[64];
+                m[0] = 0;
+                kbm_cat(m, sizeof(m), "raton: ");
+                kbm_cat_u(m, sizeof(m), (uint32_t)drained);
+                kbm_cat(m, sizeof(m), " muestras en una lectura");
+                notify(m);
+            }
         }
     }
     mbtn = g_mbtn;
@@ -971,9 +1002,14 @@ static void apply_kbm(KbmPadData *d)
 #endif
     g_rx = g_rx * MOUSE_DECAY + ((float)dx / 127.0f) * MOUSE_SENS * (1.0f - MOUSE_DECAY);
     g_ry = g_ry * MOUSE_DECAY + ((float)dy / 127.0f) * MOUSE_SENS * (1.0f - MOUSE_DECAY);
-    if (g_rx != 0.0f || g_ry != 0.0f || dx || dy) {
-        d->rightStick.x = to_axis(g_rx);
-        d->rightStick.y = to_axis(g_ry);
+    {
+        /* El juego ignora el stick por debajo de su zona muerta: sin compensarla, los
+         * movimientos lentos del raton se perdian y la camara iba a saltos. */
+        float cx = comp_deadzone(g_rx), cy = comp_deadzone(g_ry);
+        if (cx != 0.0f || cy != 0.0f) {
+            d->rightStick.x = to_axis(cx);
+            d->rightStick.y = to_axis(cy);
+        }
     }
 
     /* Gatillos: clic izq = R2, clic der = L2 */
