@@ -151,7 +151,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-novarargs-1"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-trace-1"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -269,10 +269,15 @@ static void lb_flush(void)
     if (n == 0)
         return;
     g_lb[n] = 0;
-    int32_t fd = kbm_sys_open(KBM_LOG_PATH, 0x0001 | 0x0008 | 0x0200, 0666);
-    if (fd >= 0) {
-        kbm_sys_write(fd, g_lb, n);
-        kbm_sys_close(fd);
+    static const char *const paths[] = {
+        KBM_LOG_PATH, "/data/kbm_pad.log", "/user/data/kbm_pad.log",
+    };
+    for (size_t k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
+        int32_t fd = kbm_sys_open(paths[k], 0x0001 | 0x0008 | 0x0200, 0666);
+        if (fd >= 0) {
+            kbm_sys_write(fd, g_lb, n);
+            kbm_sys_close(fd);
+        }
     }
 }
 
@@ -411,13 +416,16 @@ static void ensure_input(void)
     if (g_ready || g_failed)
         return;
 
+    notify("kbm_pad: paso 1 (iniciando entrada)");
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
+    notify("kbm_pad: paso 2 (usuario OK)");
 
     /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
      * resuelven por ruta y dlsym. */
     sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
     sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
+    notify("kbm_pad: paso 3 (sysmodule OK)");
 
     if (!resolve_input_libs()) {
         L("[kbm_pad] no se pudo resolver teclado ni raton\n");
@@ -426,6 +434,7 @@ static void ensure_input(void)
         return;
     }
 
+    notify("kbm_pad: paso 4 (librerias resueltas)");
     if (p_kbInit && p_kbOpen) {
         p_kbInit();
         g_kb = p_kbOpen(user, 0, 0, NULL);
@@ -570,7 +579,7 @@ static void fake_pad(KbmPadData *d)
 static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 {
     static bool seen;
-    if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadReadState: 1a llamada\n"); notify("kbm_pad: hook ReadState llamado"); }
     int32_t ret = HOOK_CONTINUE(scePadReadState, scePadReadState_t, handle, data);
     ensure_input();
     if (!g_ready || data == NULL)
@@ -587,7 +596,7 @@ static int32_t scePadReadState_hook(int32_t handle, KbmPadData *data)
 static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
 {
     static bool seen;
-    if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); }
+    if (!seen) { seen = true; L("[kbm_pad] hook scePadRead: 1a llamada\n"); notify("kbm_pad: hook Read llamado"); }
     int32_t ret = HOOK_CONTINUE(scePadRead, scePadRead_t, handle, data, count);
     ensure_input();
     if (!g_ready || data == NULL || count < 1)
@@ -640,6 +649,7 @@ static void kbm_start(void)
     L("[kbm_pad] enganchando scePadRead...\n");
     HOOK32(scePadRead);
     L("[kbm_pad] enganches listos\n");
+    notify(KBM_NAME ": enganches listos");
 #endif
 }
 
