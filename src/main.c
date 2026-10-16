@@ -87,6 +87,8 @@ extern int32_t scePadReadStateExt(int32_t handle, KbmPadData *data);
 #define ORBIS_KEYBOARD_MOD_LEFT_SHIFT  2
 #define ORBIS_KEYBOARD_MOD_RIGHT_CTRL  16
 #define ORBIS_KEYBOARD_MOD_RIGHT_SHIFT 32
+#define ORBIS_KEYBOARD_MOD_LEFT_ALT    4
+#define ORBIS_KEYBOARD_MOD_RIGHT_ALT   64
 #define ORBIS_KEYBOARD_KEY_F8          65
 
 typedef struct OrbisKeyboardData {
@@ -129,6 +131,11 @@ static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 #define K_W 26
 #define K_ENTER 40
 #define K_TAB   43
+#define K_ESC   41
+#define K_1     30
+#define K_2     31
+#define K_3     32
+#define K_4     33
 #define K_SPACE 44
 #define K_RIGHT 79
 #define K_LEFT  80
@@ -159,6 +166,9 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
+#define MOUSE_BTN_MIDDLE 0x4   /* supuesto: bit2 = rueda pulsada */
+#define MOUSE_BTN_BACK   0x8   /* supuesto: lateral 1 */
+#define MOUSE_BTN_FWD    0x10  /* supuesto: lateral 2 */
 
 #define KBM_BUILD "build-ext-1"   /* marca para saber que .prx esta cargado */
 
@@ -542,6 +552,289 @@ static bool resolve_input_libs(void)
     return kb_ok || m_ok;
 }
 
+/* ------------------------------------------------ AUTO-ACTUALIZACION */
+/* Al arrancar el juego, un hilo espera unos segundos, lee VERSION del repositorio
+ * (por HTTPS, con la verificacion de certificados del sistema) y, si es mayor que
+ * KBM_VERSION, descarga el .prx de la release vN y lo deja en lugar del actual. Se
+ * aplica al reiniciar el juego. Todo es opcional y a prueba de fallos:
+ *   - /data/GoldHEN/kbm_pad.noupdate        -> desactiva la auto-actualizacion
+ *   - /data/GoldHEN/kbm_pad.update.lock     -> intento en curso; si queda de un intento
+ *                                              anterior 2 veces seguidas (cierre del
+ *                                              juego), se crea kbm_pad.update.failed
+ *   - /data/GoldHEN/kbm_pad.update.failed   -> auto-actualizacion desactivada; borrala
+ *                                              por FTP para volver a activarla. */
+#ifndef KBM_VERSION
+#define KBM_VERSION 0
+#endif
+#define KBM_UPD_VERSION_URL "https://raw.githubusercontent.com/Y4ll/-ps4-kbm-pad/main/VERSION"
+#define KBM_UPD_PRX_PREFIX  "https://github.com/Y4ll/-ps4-kbm-pad/releases/download/v"
+#define KBM_UPD_PRX_SUFFIX  "/kbm_pad.prx"
+#define KBM_PRX_PATH        "/data/GoldHEN/plugins/kbm_pad.prx"
+#define KBM_PRX_NEW         "/data/GoldHEN/plugins/kbm_pad.prx.new"
+#define KBM_UPD_LOCK        "/data/GoldHEN/kbm_pad.update.lock"
+#define KBM_UPD_FAILED      "/data/GoldHEN/kbm_pad.update.failed"
+#define KBM_UPD_OFF         "/data/GoldHEN/kbm_pad.noupdate"
+
+extern int64_t kbm_sys_read(int32_t fd, void *buf, size_t n) __asm__("sceKernelRead");
+extern int32_t kbm_sys_rename(const char *from, const char *to) __asm__("sceKernelRename");
+extern int32_t kbm_sys_unlink(const char *path) __asm__("sceKernelUnlink");
+extern int32_t kbm_usleep(uint32_t us) __asm__("sceKernelUsleep");
+extern int32_t kbm_thread_create(void **th, const void *attr, void *(*entry)(void *),
+                                 void *arg, const char *name) __asm__("scePthreadCreate");
+
+static int32_t (*u_netInit)(void);
+static int32_t (*u_poolCreate)(const char *name, int32_t size, int32_t flags);
+static int32_t (*u_poolDestroy)(int32_t pool);
+static int32_t (*u_sslInit)(size_t poolSize);
+static int32_t (*u_sslTerm)(int32_t ctx);
+static int32_t (*u_httpInit)(int32_t netPool, int32_t sslCtx, size_t poolSize);
+static int32_t (*u_httpTerm)(int32_t ctx);
+static int32_t (*u_tmplCreate)(int32_t ctx, const char *ua, int32_t ver, int32_t proxy);
+static int32_t (*u_tmplDelete)(int32_t tmpl);
+static int32_t (*u_connURL)(int32_t tmpl, const char *url, int32_t keepalive);
+static int32_t (*u_connDelete)(int32_t conn);
+static int32_t (*u_reqURL)(int32_t conn, int32_t method, const char *url, uint64_t len);
+static int32_t (*u_reqDelete)(int32_t req);
+static int32_t (*u_send)(int32_t req, const void *post, size_t size);
+static int32_t (*u_status)(int32_t req, int32_t *code);
+static int32_t (*u_read)(int32_t req, void *data, size_t size);
+static int32_t (*u_autoRedir)(int32_t id, int32_t enable);
+static int32_t (*u_tmoConn)(int32_t id, uint32_t us);
+static int32_t (*u_tmoRecv)(int32_t id, uint32_t us);
+static int32_t (*u_tmoSend)(int32_t id, uint32_t us);
+static int32_t (*u_tmoResolve)(int32_t id, uint32_t us);
+
+static void *upd_sym(int32_t h, const char *name)
+{
+    void *a = NULL;
+    if (h > 0 && kbm_dlsym(h, name, &a) == 0)
+        return a;
+    return NULL;
+}
+
+static void kbm_cat_u(char *dst, size_t cap, uint32_t v)
+{
+    char t[12], o[12];
+    int n = 0, k = 0;
+    if (v == 0)
+        t[n++] = '0';
+    while (v) {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    while (n)
+        o[k++] = t[--n];
+    o[k] = 0;
+    kbm_cat(dst, cap, o);
+}
+
+static bool upd_exists(const char *path)
+{
+    int32_t fd = kbm_sys_open(path, 0, 0);
+    if (fd < 0)
+        return false;
+    kbm_sys_close(fd);
+    return true;
+}
+
+static void upd_write_small(const char *path, const char *text, size_t n)
+{
+    int32_t fd = kbm_sys_open(path, 0x0001 | 0x0200 | 0x0400, 0666);   /* WRONLY|CREAT|TRUNC */
+    if (fd >= 0) {
+        kbm_sys_write(fd, text, n);
+        kbm_sys_close(fd);
+    }
+}
+
+static bool upd_load_api(void)
+{
+    int32_t hn = load_sys_lib("libSceNet.sprx");
+    int32_t hs = load_sys_lib("libSceSsl.sprx");
+    int32_t hh = load_sys_lib("libSceHttp.sprx");
+    u_netInit    = (int32_t (*)(void))upd_sym(hn, "sceNetInit");
+    u_poolCreate = (int32_t (*)(const char *, int32_t, int32_t))upd_sym(hn, "sceNetPoolCreate");
+    u_poolDestroy = (int32_t (*)(int32_t))upd_sym(hn, "sceNetPoolDestroy");
+    u_sslInit    = (int32_t (*)(size_t))upd_sym(hs, "sceSslInit");
+    u_sslTerm    = (int32_t (*)(int32_t))upd_sym(hs, "sceSslTerm");
+    u_httpInit   = (int32_t (*)(int32_t, int32_t, size_t))upd_sym(hh, "sceHttpInit");
+    u_httpTerm   = (int32_t (*)(int32_t))upd_sym(hh, "sceHttpTerm");
+    u_tmplCreate = (int32_t (*)(int32_t, const char *, int32_t, int32_t))upd_sym(hh, "sceHttpCreateTemplate");
+    u_tmplDelete = (int32_t (*)(int32_t))upd_sym(hh, "sceHttpDeleteTemplate");
+    u_connURL    = (int32_t (*)(int32_t, const char *, int32_t))upd_sym(hh, "sceHttpCreateConnectionWithURL");
+    u_connDelete = (int32_t (*)(int32_t))upd_sym(hh, "sceHttpDeleteConnection");
+    u_reqURL     = (int32_t (*)(int32_t, int32_t, const char *, uint64_t))upd_sym(hh, "sceHttpCreateRequestWithURL");
+    u_reqDelete  = (int32_t (*)(int32_t))upd_sym(hh, "sceHttpDeleteRequest");
+    u_send       = (int32_t (*)(int32_t, const void *, size_t))upd_sym(hh, "sceHttpSendRequest");
+    u_status     = (int32_t (*)(int32_t, int32_t *))upd_sym(hh, "sceHttpGetStatusCode");
+    u_read       = (int32_t (*)(int32_t, void *, size_t))upd_sym(hh, "sceHttpReadData");
+    u_autoRedir  = (int32_t (*)(int32_t, int32_t))upd_sym(hh, "sceHttpSetAutoRedirect");
+    u_tmoConn    = (int32_t (*)(int32_t, uint32_t))upd_sym(hh, "sceHttpSetConnectTimeOut");
+    u_tmoRecv    = (int32_t (*)(int32_t, uint32_t))upd_sym(hh, "sceHttpSetRecvTimeOut");
+    u_tmoSend    = (int32_t (*)(int32_t, uint32_t))upd_sym(hh, "sceHttpSetSendTimeOut");
+    u_tmoResolve = (int32_t (*)(int32_t, uint32_t))upd_sym(hh, "sceHttpSetResolveTimeOut");
+    return u_netInit && u_poolCreate && u_poolDestroy && u_sslInit && u_sslTerm &&
+           u_httpInit && u_httpTerm && u_tmplCreate && u_tmplDelete && u_connURL &&
+           u_connDelete && u_reqURL && u_reqDelete && u_send && u_status && u_read &&
+           u_autoRedir && u_tmoConn && u_tmoRecv && u_tmoSend && u_tmoResolve;
+}
+
+/* GET de una URL https. Si fd >= 0 el cuerpo se escribe en ese archivo; si no, va a mem
+ * (con terminador). Devuelve 0 si todo salio bien (codigo 200). */
+static int upd_get(int32_t tmpl, const char *url, int32_t fd, char *mem, size_t cap,
+                   size_t *got, uint8_t *first4)
+{
+    static uint8_t buf[8192];
+    *got = 0;
+    int32_t conn = u_connURL(tmpl, url, 1);
+    if (conn < 0)
+        return -1;
+    int rc = -2;
+    int32_t req = u_reqURL(conn, 0 /* GET */, url, 0);
+    if (req >= 0) {
+        int32_t status = 0;
+        if (u_send(req, NULL, 0) < 0) {
+            rc = -3;
+        } else if (u_status(req, &status) < 0 || status != 200) {
+            rc = -4;
+        } else {
+            size_t total = 0;
+            rc = 0;
+            for (;;) {
+                int32_t n = u_read(req, buf, sizeof(buf));
+                if (n < 0) { rc = -5; break; }
+                if (n == 0) break;
+                if (first4)
+                    for (int32_t i = 0; i < n && total + (size_t)i < 4; i++)
+                        first4[total + (size_t)i] = buf[i];
+                if (fd >= 0) {
+                    if (kbm_sys_write(fd, buf, (size_t)n) != n) { rc = -6; break; }
+                } else {
+                    if (total + (size_t)n + 1 > cap) { rc = -7; break; }
+                    for (int32_t i = 0; i < n; i++)
+                        mem[total + (size_t)i] = (char)buf[i];
+                }
+                total += (size_t)n;
+                if (total > 1024u * 1024u) { rc = -8; break; }
+            }
+            if (fd < 0 && rc == 0)
+                mem[total] = 0;
+            *got = total;
+        }
+        u_reqDelete(req);
+    }
+    u_connDelete(conn);
+    return rc;
+}
+
+static void upd_do(void)
+{
+    if (!upd_load_api()) {
+        L("[kbm_pad] update: faltan funciones de red\n");
+        return;
+    }
+    u_netInit();
+    int32_t pool = u_poolCreate("kbm_upd", 64 * 1024, 0);
+    int32_t ssl  = u_sslInit(256 * 1024);
+    int32_t http = u_httpInit(pool, ssl, 128 * 1024);
+    int32_t tmpl = http >= 0 ? u_tmplCreate(http, "kbm_pad-updater/1", 2 /* HTTP 1.1 */, 1) : -1;
+    if (tmpl >= 0) {
+        u_autoRedir(tmpl, 1);
+        u_tmoResolve(tmpl, 10u * 1000u * 1000u);
+        u_tmoConn(tmpl, 10u * 1000u * 1000u);
+        u_tmoSend(tmpl, 10u * 1000u * 1000u);
+        u_tmoRecv(tmpl, 15u * 1000u * 1000u);
+
+        char vbuf[32];
+        size_t got = 0;
+        int rc = upd_get(tmpl, KBM_UPD_VERSION_URL, -1, vbuf, sizeof(vbuf), &got, NULL);
+        uint32_t remote = 0;
+        bool digits = false;
+        if (rc == 0) {
+            for (size_t i = 0; i < got && vbuf[i] >= '0' && vbuf[i] <= '9'; i++) {
+                remote = remote * 10 + (uint32_t)(vbuf[i] - '0');
+                digits = true;
+            }
+        }
+        lb_s("[kbm_pad] update: rc="); lb_d(rc); lb_s(" remota="); lb_d((int32_t)remote);
+        lb_s(" local="); lb_d(KBM_VERSION); lb_s("\n"); lb_flush();
+
+        if (rc == 0 && digits && remote > (uint32_t)KBM_VERSION) {
+            char url[160];
+            url[0] = 0;
+            kbm_cat(url, sizeof(url), KBM_UPD_PRX_PREFIX);
+            kbm_cat_u(url, sizeof(url), remote);
+            kbm_cat(url, sizeof(url), KBM_UPD_PRX_SUFFIX);
+
+            int32_t fd = kbm_sys_open(KBM_PRX_NEW, 0x0001 | 0x0200 | 0x0400, 0666);
+            if (fd >= 0) {
+                uint8_t first4[4] = {0, 0, 0, 0};
+                size_t size = 0;
+                int drc = upd_get(tmpl, url, fd, NULL, 0, &size, first4);
+                kbm_sys_close(fd);
+                /* FSELF: magic 4f 15 3d 1d y un tamano razonable */
+                bool ok = drc == 0 && size > 16384 && size < 1024u * 1024u &&
+                          first4[0] == 0x4f && first4[1] == 0x15 &&
+                          first4[2] == 0x3d && first4[3] == 0x1d;
+                lb_s("[kbm_pad] update: descarga rc="); lb_d(drc); lb_s(" bytes="); lb_d((int32_t)size);
+                lb_s(ok ? " OK\n" : " INVALIDA\n"); lb_flush();
+                if (ok && kbm_sys_rename(KBM_PRX_NEW, KBM_PRX_PATH) == 0) {
+                    char msg[96];
+                    msg[0] = 0;
+                    kbm_cat(msg, sizeof(msg), "kbm_pad actualizado a v");
+                    kbm_cat_u(msg, sizeof(msg), remote);
+                    kbm_cat(msg, sizeof(msg), ". Reinicia el juego.");
+                    notify(msg);
+                } else {
+                    kbm_sys_unlink(KBM_PRX_NEW);
+                }
+            }
+        }
+        u_tmplDelete(tmpl);
+    }
+    if (http >= 0) u_httpTerm(http);
+    if (ssl >= 0)  u_sslTerm(ssl);
+    if (pool >= 0) u_poolDestroy(pool);
+}
+
+static void upd_run(void)
+{
+    if (upd_exists(KBM_UPD_OFF) || upd_exists(KBM_UPD_FAILED))
+        return;
+    /* El archivo lock cuenta intentos sin terminar (el juego se cerro a medias). */
+    int tries = 0;
+    int32_t fd = kbm_sys_open(KBM_UPD_LOCK, 0, 0);
+    if (fd >= 0) {
+        char c = 0;
+        if (kbm_sys_read(fd, &c, 1) == 1 && c >= '0' && c <= '9')
+            tries = c - '0';
+        kbm_sys_close(fd);
+    }
+    if (tries >= 2) {
+        upd_write_small(KBM_UPD_FAILED, "1", 1);
+        kbm_sys_unlink(KBM_UPD_LOCK);
+        notify("kbm_pad: auto-actualizacion desactivada tras un fallo");
+        return;
+    }
+    char t = (char)('0' + tries + 1);
+    upd_write_small(KBM_UPD_LOCK, &t, 1);
+    upd_do();
+    kbm_sys_unlink(KBM_UPD_LOCK);
+}
+
+static void *upd_thread(void *arg)
+{
+    (void)arg;
+    kbm_usleep(20u * 1000u * 1000u);   /* dejar que el juego termine de arrancar */
+    upd_run();
+    return NULL;
+}
+
+static void start_update_thread(void)
+{
+    void *th = NULL;
+    kbm_thread_create(&th, NULL, upd_thread, NULL, "kbm_upd");
+}
+
 static void ensure_input(void)
 {
     if (g_ready || g_failed)
@@ -629,7 +922,7 @@ static void apply_kbm(KbmPadData *d)
     g_toggle_down = t;
 
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
-    int32_t dx = 0, dy = 0;
+    int32_t dx = 0, dy = 0, dw = 0;
     /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
      * sigue como estaba; antes se ponia a 0 y la mira (L2) se soltaba sola. */
     static uint32_t g_mbtn;
@@ -643,6 +936,7 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
+            dw += mb.m.wheel;
             if (mb.m.buttons != g_mbtn) {   /* diagnostico: aviso en cada cambio de botones */
                 static int g_btn_notices;
                 if (g_btn_notices < 16) {
@@ -727,6 +1021,28 @@ static void apply_kbm(KbmPadData *d)
     if (has_key(&kd, K_DOWN))  d->buttons |= KBM_PAD_BUTTON_DOWN;
     if (has_key(&kd, K_LEFT))  d->buttons |= KBM_PAD_BUTTON_LEFT;
     if (has_key(&kd, K_RIGHT)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
+
+    /* Extras: 1-4 = cruceta (arriba, derecha, abajo, izquierda), Esc = Options, Alt = circulo */
+    if (has_key(&kd, K_1)) d->buttons |= KBM_PAD_BUTTON_UP;
+    if (has_key(&kd, K_2)) d->buttons |= KBM_PAD_BUTTON_RIGHT;
+    if (has_key(&kd, K_3)) d->buttons |= KBM_PAD_BUTTON_DOWN;
+    if (has_key(&kd, K_4)) d->buttons |= KBM_PAD_BUTTON_LEFT;
+    if (has_key(&kd, K_ESC)) d->buttons |= KBM_PAD_BUTTON_OPTIONS;
+    if (kd.mods & (ORBIS_KEYBOARD_MOD_LEFT_ALT | ORBIS_KEYBOARD_MOD_RIGHT_ALT))
+        d->buttons |= KBM_PAD_BUTTON_CIRCLE;
+
+    /* Raton extra: rueda = L1 (arriba) / R1 (abajo) en pulsos cortos; clic central = R3;
+     * lateral 1 = L3; lateral 2 = circulo. */
+    {
+        static int g_wheel_l1, g_wheel_r1;
+        if (dw > 0) g_wheel_l1 = 4;
+        if (dw < 0) g_wheel_r1 = 4;
+        if (g_wheel_l1 > 0) { g_wheel_l1--; d->buttons |= KBM_PAD_BUTTON_L1; }
+        if (g_wheel_r1 > 0) { g_wheel_r1--; d->buttons |= KBM_PAD_BUTTON_R1; }
+        if (mbtn & MOUSE_BTN_MIDDLE) d->buttons |= KBM_PAD_BUTTON_R3;
+        if (mbtn & MOUSE_BTN_BACK)   d->buttons |= KBM_PAD_BUTTON_L3;
+        if (mbtn & MOUSE_BTN_FWD)    d->buttons |= KBM_PAD_BUTTON_CIRCLE;
+    }
 }
 
 /* Rellena un KbmPadData neutro cuando no hay mando fisico. */
@@ -805,10 +1121,23 @@ static void kbm_start(void)
     g_hooked = true;
     lb_s("["); lb_s(KBM_NAME); lb_s("] cargado ("); lb_s(kbm_relro_anchor[0]);
     lb_s(", etapa "); lb_d(KBM_STAGE); lb_s(")\n"); lb_flush();
+#if KBM_STAGE >= 3
+    {
+        char hello[48];
+        hello[0] = 0;
+        kbm_cat(hello, sizeof(hello), KBM_NAME " cargado v");
+        kbm_cat_u(hello, sizeof(hello), KBM_VERSION);
+        notify(hello);
+    }
+#else
     notify(KBM_NAME " cargado");
+#endif
 #if KBM_STAGE >= 2
     if (install_pad_hooks())
         notify(KBM_NAME ": enganches listos");
+#endif
+#if KBM_STAGE >= 3
+    start_update_thread();
 #endif
 }
 

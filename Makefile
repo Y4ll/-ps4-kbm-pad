@@ -18,8 +18,10 @@ LIBS       := -lSceLibcInternal -lkernel -lSceSysmodule -lSceUserService \
               -lScePad
 
 LOG_TYPE   := -D__USE_KLOG__
+# Version del plugin (archivo VERSION): sube el numero para publicar una actualizacion
+KBM_VERSION := $(shell cat VERSION 2>/dev/null || echo 0)
 CFLAGS     := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
-              -fno-stack-protector -c $(LOG_TYPE) -DDEBUG=0 \
+              -fno-stack-protector -c $(LOG_TYPE) -DDEBUG=0 -DKBM_VERSION=$(KBM_VERSION) \
               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include \
               -Isdk/include -Wall
 LDBASE     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x -e _init \

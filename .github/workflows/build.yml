@@ -101,6 +101,20 @@ jobs:
             --title "Ultima compilacion" --target "$GITHUB_SHA" \
             --notes "Archivos .prx directos (sin zip). Commit: $GITHUB_SHA"
 
+      - name: Publish versioned release (auto-update)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "v$v ya existe: no se sobrescribe (sube VERSION para publicar una actualizacion)"
+          else
+            gh release create "v$v" kbm_pad.prx \
+              --title "kbm_pad v$v" --target "$GITHUB_SHA" \
+              --notes "Version para auto-actualizacion. Commit: $GITHUB_SHA"
+          fi
+
       - name: Upload kbm_pad.prx
         uses: actions/upload-artifact@v4
         with:
