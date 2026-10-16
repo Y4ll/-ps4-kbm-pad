@@ -13,8 +13,9 @@ OBJS       := $(patsubst sdk/source/%.c,$(INTDIR)/sdk_%.o,$(SDK_SRC)) \
               $(patsubst src/%.c,$(INTDIR)/app_%.o,$(APP_SRC))
 CRT_OBJ    := $(INTDIR)/crtprx.o
 
+# Teclado y raton se cargan en tiempo de ejecucion (ver resolve_input_libs en main.c)
 LIBS       := -lSceLibcInternal -lkernel -lSceSysmodule -lSceUserService \
-              -lScePad -lSceKeyboard -lSceMouse
+              -lScePad
 
 LOG_TYPE   := -D__USE_KLOG__
 CFLAGS     := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables \

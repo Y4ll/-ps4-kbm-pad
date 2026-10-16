@@ -85,9 +85,12 @@ typedef struct OrbisKeyboardData {
     uint16_t keycodes[32];
 } OrbisKeyboardData;
 
-extern int32_t sceKeyboardInit(void);
-extern int32_t sceKeyboardOpen(int32_t userID, int32_t type, int32_t index, void *param);
-extern int32_t sceKeyboardReadState(int32_t handle, OrbisKeyboardData *data);
+/* Teclado y raton NO se enlazan en tiempo de compilacion: si el juego no tiene
+ * libSceKeyboard/libSceMouse cargadas, el modulo entero fallaba al cargar y no
+ * llegaba ni a module_start. Se resuelven en tiempo de ejecucion (resolve_input_libs). */
+static int32_t (*p_kbInit)(void);
+static int32_t (*p_kbOpen)(int32_t userID, int32_t type, int32_t index, void *param);
+static int32_t (*p_kbRead)(int32_t handle, OrbisKeyboardData *data);
 
 /* IDs de sysmodule (libSceKeyboard.sprx / libSceMouse.sprx) */
 #define KBM_SYSMODULE_KEYBOARD 0x0106
@@ -135,14 +138,14 @@ typedef struct KbmMouse {
 
 typedef union { KbmMouse m; uint8_t raw[128]; } KbmMouseBuf;
 
-extern int32_t sceMouseInit(void);
-extern int32_t sceMouseOpen(int32_t userId, int32_t type, int32_t index, void *param);
-extern int32_t sceMouseRead(int32_t handle, void *data, int32_t count);
+static int32_t (*p_mInit)(void);
+static int32_t (*p_mOpen)(int32_t userId, int32_t type, int32_t index, void *param);
+static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-log-1"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-dyn-2"   /* marca para saber que .prx esta cargado */
 
 /* ------------------------------------------------- REGISTRO A ARCHIVO */
 /* Sin klog ni PC: el plugin escribe /data/GoldHEN/kbm_pad.log (se abre por
@@ -240,6 +243,52 @@ static int32_t g_kb = -1;
 static int32_t g_mouse = -1;
 static float   g_rx, g_ry;   /* inercia del stick derecho */
 
+/* Carga un .sprx del sistema y obtiene su handle. Etiquetas asm para no chocar
+ * con las declaraciones del header del toolchain. */
+extern int32_t kbm_load_module(const char *path, size_t argc, const void *argv,
+                               uint32_t flags, void *opt, int32_t *res)
+    __asm__("sceKernelLoadStartModule");
+extern int32_t kbm_dlsym(int32_t handle, const char *name, void **out)
+    __asm__("sceKernelDlsym");
+
+static int32_t load_lib(const char *path)
+{
+    int32_t res = 0;
+    int32_t h = kbm_load_module(path, 0, NULL, 0, NULL, &res);
+    kbm_log("[kbm_pad] cargar %s -> handle=0x%x res=%d\n", path, (unsigned)h, res);
+    return h;
+}
+
+static void *find_sym(int32_t handle, const char *name)
+{
+    void *addr = NULL;
+    int32_t r = kbm_dlsym(handle, name, &addr);
+    kbm_log("[kbm_pad] dlsym %s -> %d addr=%p\n", name, r, addr);
+    return r == 0 ? addr : NULL;
+}
+
+static bool resolve_input_libs(void)
+{
+    int32_t hk = load_lib("/system/common/lib/libSceKeyboard.sprx");
+    if (hk > 0) {
+        p_kbInit = (int32_t (*)(void))find_sym(hk, "sceKeyboardInit");
+        p_kbOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))find_sym(hk, "sceKeyboardOpen");
+        p_kbRead = (int32_t (*)(int32_t, OrbisKeyboardData *))find_sym(hk, "sceKeyboardReadState");
+    }
+    int32_t hm = load_lib("/system/common/lib/libSceMouse.sprx");
+    if (hm > 0) {
+        p_mInit = (int32_t (*)(void))find_sym(hm, "sceMouseInit");
+        p_mOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))find_sym(hm, "sceMouseOpen");
+        p_mRead = (int32_t (*)(int32_t, void *, int32_t))find_sym(hm, "sceMouseRead");
+    }
+    bool kb_ok = p_kbInit && p_kbOpen && p_kbRead;
+    bool m_ok  = p_mInit && p_mOpen && p_mRead;
+    kbm_log("[kbm_pad] funciones: teclado=%s raton=%s\n", kb_ok ? "OK" : "FALLO", m_ok ? "OK" : "FALLO");
+    if (!kb_ok) p_kbRead = NULL;
+    if (!m_ok)  p_mRead = NULL;
+    return kb_ok || m_ok;
+}
+
 static void ensure_input(void)
 {
     if (g_ready || g_failed)
@@ -248,14 +297,26 @@ static void ensure_input(void)
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
 
+    /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
+     * resuelven por ruta y dlsym. */
     sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
     sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
 
-    sceKeyboardInit();
-    g_kb = sceKeyboardOpen(user, 0, 0, NULL);
+    if (!resolve_input_libs()) {
+        kbm_log("[kbm_pad] no se pudo resolver teclado ni raton\n");
+        notify("kbm_pad: no se pudo cargar teclado/raton");
+        g_failed = true;
+        return;
+    }
 
-    sceMouseInit();
-    g_mouse = sceMouseOpen(user, 0, 0, NULL);
+    if (p_kbInit && p_kbOpen) {
+        p_kbInit();
+        g_kb = p_kbOpen(user, 0, 0, NULL);
+    }
+    if (p_mInit && p_mOpen) {
+        p_mInit();
+        g_mouse = p_mOpen(user, 0, 0, NULL);
+    }
 
     kbm_log("[kbm_pad] user=%d keyboard=%d mouse=%d\n", user, g_kb, g_mouse);
 
@@ -294,7 +355,7 @@ static void apply_kbm(KbmPadData *d)
 {
     OrbisKeyboardData kd;
     memset(&kd, 0, sizeof(kd));
-    if (g_kb >= 0 && sceKeyboardReadState(g_kb, &kd) < 0)
+    if (g_kb >= 0 && p_kbRead && p_kbRead(g_kb, &kd) < 0)
         memset(&kd, 0, sizeof(kd));
 
     /* Toggle con F8 (flanco de subida) */
@@ -309,11 +370,11 @@ static void apply_kbm(KbmPadData *d)
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
     int32_t dx = 0, dy = 0;
     uint32_t mbtn = 0;
-    if (g_mouse >= 0) {
+    if (g_mouse >= 0 && p_mRead) {
         for (int i = 0; i < 8; i++) {
             KbmMouseBuf mb;
             memset(&mb, 0, sizeof(mb));
-            int32_t n = sceMouseRead(g_mouse, &mb, 1);
+            int32_t n = p_mRead(g_mouse, &mb, 1);
             if (n <= 0)
                 break;
             dx += mb.m.xAxis;
