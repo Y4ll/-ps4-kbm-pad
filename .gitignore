@@ -9,3 +9,4 @@ app/eboot.bin
 app/sce_module/
 app/sce_sys/param.sfo
 app/build.log
+!app/Media/jb.prx
