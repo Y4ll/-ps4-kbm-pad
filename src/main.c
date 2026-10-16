@@ -150,7 +150,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-nolibc-3"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "build-relro-1"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -171,6 +171,18 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #include <stdarg.h>
 
 #define KBM_LOG_PATH "/data/GoldHEN/kbm_pad.log"
+
+/* Ancla de .data.rel.ro. Hallazgo (comparando los .prx por dentro): todos los
+ * plugins que cargan en la PS4 tienen un segmento PT_SCE_RELRO (0x61000010) y
+ * todos los que no daban senales no lo tenian. Los probes lo tienen porque
+ * llevan un arreglo const de punteros (PATHS[], que con -fPIC cae en
+ * .data.rel.ro); main.c no tenia ningun dato asi. Esta tabla fuerza ese
+ * segmento. Debe usarse (kbm_start) o el compilador la descarta. */
+static const char *const kbm_relro_anchor[] = {
+    KBM_BUILD,
+    KBM_LOG_PATH,
+    KBM_NAME,
+};
 
 extern int32_t kbm_sys_open(const char *path, int32_t flags, int32_t mode)
     __asm__("sceKernelOpen");
@@ -634,7 +646,8 @@ static void kbm_start(void)
     if (g_hooked)
         return;
     g_hooked = true;
-    kbm_log("[%s] cargado (%s, etapa %d)\n", KBM_NAME, KBM_BUILD, KBM_STAGE);
+    kbm_log("[%s] cargado (%s, etapa %d, ancla=%s)\n", KBM_NAME,
+            kbm_relro_anchor[0], KBM_STAGE, kbm_relro_anchor[2]);
     notify(KBM_NAME " cargado");
 #if KBM_STAGE >= 2
     kbm_log("[kbm_pad] enganchando scePadReadState...\n");
