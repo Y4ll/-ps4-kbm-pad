@@ -17,6 +17,7 @@
 #include <orbis/UserService.h>
 
 #include "Detour.h"
+#include "HDE64.h"
 #include "Utilities.h"
 #include "Patcher.h"
 #include "Syscall.h"
@@ -503,6 +504,11 @@ static bool    g_failed;
 static bool    g_enabled = true;
 static int32_t g_kb = -1;
 static int32_t g_mouse = -1;
+static bool     g_hide = true;          /* ini: ocultar=1 -> el juego no ve el teclado ni el raton */
+static bool     g_hide_done;
+static int      g_hide_state;           /* 0 = apagado, 1 = activo, 2 = parcial o no se pudo */
+static uint32_t g_dbg_mmove, g_dbg_stick;   /* diagnostico: muestras con movimiento / veces que el stick derecho se movio */
+static void    *p_kbReadFn;             /* sceKeyboardRead (solo para ocultarlo) */
 static float   g_rx, g_ry;   /* inercia del stick derecho */
 
 /* Carga un .sprx del sistema y obtiene su handle. Etiquetas asm para no chocar
@@ -552,6 +558,7 @@ static bool resolve_input_libs(void)
         p_kbInit = (int32_t (*)(void))find_sym(hk, "sceKeyboardInit");
         p_kbOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))find_sym(hk, "sceKeyboardOpen");
         p_kbRead = (int32_t (*)(int32_t, OrbisKeyboardData *))find_sym(hk, "sceKeyboardReadState");
+        p_kbReadFn = find_sym(hk, "sceKeyboardRead");
     }
     int32_t hm = load_sys_lib("libSceMouse.sprx");
     if (hm > 0) {
@@ -566,6 +573,100 @@ static bool resolve_input_libs(void)
     if (!kb_ok) p_kbRead = NULL;
     if (!m_ok)  p_mRead = NULL;
     return kb_ok || m_ok;
+}
+
+/* ------------------------------------------ OCULTAR TECLADO Y RATON AL JUEGO */
+/* Con el plugin activo el juego debe ver solo un mando: si detecta el teclado o el raton
+ * USB pasa a su "modo teclado y raton" e ignora el stick que inyecta el plugin. Se
+ * enganchan las funciones de libSceKeyboard / libSceMouse: para el juego devuelven
+ * "sin dispositivo". El plugin sigue usando las originales (por el stub del Detour).
+ * Solo se engancha una funcion si sus primeras instrucciones se pueden copiar sin tocar
+ * (sin saltos relativos ni accesos RIP-relativos): el Detour las copia tal cual y,
+ * si no, el juego se cerraria. Ante cualquier duda no se toca nada. */
+#define KBM_NO_DEVICE ((int32_t)0x80DF0006)
+
+static Detour g_dt_kbOpen  = { DetourMode_x64 };
+static Detour g_dt_kbState = { DetourMode_x64 };
+static Detour g_dt_kbRead  = { DetourMode_x64 };
+static Detour g_dt_mOpen   = { DetourMode_x64 };
+static Detour g_dt_mRead   = { DetourMode_x64 };
+
+static int32_t kb_open_hide(int32_t u, int32_t t, int32_t i, void *p) { (void)u; (void)t; (void)i; (void)p; return KBM_NO_DEVICE; }
+static int32_t kb_state_hide(int32_t h, void *d) { (void)h; (void)d; return KBM_NO_DEVICE; }
+static int32_t kb_read_hide(int32_t h, void *d, int32_t n) { (void)h; (void)d; (void)n; return 0; }
+static int32_t m_open_hide(int32_t u, int32_t t, int32_t i, void *p) { (void)u; (void)t; (void)i; (void)p; return KBM_NO_DEVICE; }
+static int32_t m_read_hide(int32_t h, void *d, int32_t n) { (void)h; (void)d; (void)n; return 0; }
+
+static bool prologue_safe(const void *fn)
+{
+    size_t size = 0;
+    while (size < 14) {
+        hde64s hs;
+        uint32_t n = hde64_disasm((const uint8_t *)fn + size, &hs);
+        if (n == 0 || (hs.flags & (F_ERROR | F_RELATIVE)))
+            return false;
+        if ((hs.flags & F_MODRM) && hs.modrm_mod == 0 && hs.modrm_rm == 5)
+            return false;                       /* [RIP + disp32] */
+        if (hs.opcode == 0xC3 || hs.opcode == 0xC2 || hs.opcode == 0xCC)
+            return false;                       /* la funcion acaba antes de 14 bytes */
+        size += n;
+    }
+    return true;
+}
+
+static void *hide_one(Detour *d, void *fn, void *hook, const char *name)
+{
+    if (!fn)
+        return NULL;
+    if (!prologue_safe(fn)) {
+        lb_s("[kbm_pad] ocultar: "); lb_s(name); lb_s(" prologo no seguro, no se toca\n"); lb_flush();
+        return NULL;
+    }
+    Detour_Construct(d, DetourMode_x64);
+    void *stub = Detour_DetourFunction(d, (uint64_t)(uintptr_t)fn, hook);
+    lb_s("[kbm_pad] ocultar: "); lb_s(name); lb_s(stub ? " enganchada\n" : " fallo al enganchar\n"); lb_flush();
+    return stub;
+}
+
+static void hide_devices(void)
+{
+    if (g_hide_done)
+        return;
+    g_hide_done = true;
+    if (!g_hide) {
+        g_hide_state = 0;
+        lb_s("[kbm_pad] ocultar: desactivado (ocultar=0)\n"); lb_flush();
+        return;
+    }
+    int want = 0, ok = 0;
+    void *s;
+    if (p_kbOpen) {
+        want++;
+        s = hide_one(&g_dt_kbOpen, (void *)p_kbOpen, (void *)kb_open_hide, "sceKeyboardOpen");
+        if (s) { p_kbOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))s; ok++; }
+    }
+    if (p_kbRead) {
+        want++;
+        s = hide_one(&g_dt_kbState, (void *)p_kbRead, (void *)kb_state_hide, "sceKeyboardReadState");
+        if (s) { p_kbRead = (int32_t (*)(int32_t, OrbisKeyboardData *))s; ok++; }
+    }
+    if (p_kbReadFn) {
+        want++;
+        s = hide_one(&g_dt_kbRead, p_kbReadFn, (void *)kb_read_hide, "sceKeyboardRead");
+        if (s) ok++;     /* el plugin no usa sceKeyboardRead: no hace falta guardar el stub */
+    }
+    if (p_mOpen) {
+        want++;
+        s = hide_one(&g_dt_mOpen, (void *)p_mOpen, (void *)m_open_hide, "sceMouseOpen");
+        if (s) { p_mOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))s; ok++; }
+    }
+    if (p_mRead) {
+        want++;
+        s = hide_one(&g_dt_mRead, (void *)p_mRead, (void *)m_read_hide, "sceMouseRead");
+        if (s) { p_mRead = (int32_t (*)(int32_t, void *, int32_t))s; ok++; }
+    }
+    g_hide_state = (want > 0 && ok == want) ? 1 : 2;
+    lb_s("[kbm_pad] ocultar: "); lb_d(ok); lb_s(" de "); lb_d(want); lb_s(" funciones\n"); lb_flush();
 }
 
 /* ------------------------------------------------ AUTO-ACTUALIZACION */
@@ -908,6 +1009,11 @@ static const char k_ini_default[] =
     "invertir_y=0\n"
     "alternar_mira=0\n"
     "\n"
+    "# --- Ocultar teclado y raton al juego ---\n"
+    "# ocultar=1: el juego solo ve un mando (no detecta el teclado ni el raton USB).\n"
+    "# ocultar=0: los deja visibles. El cambio se aplica al reiniciar el juego.\n"
+    "ocultar=1\n"
+    "\n"
     "# --- Teclas de control ---\n"
     "tecla_pausa=f8\n"
     "tecla_conducir=f7\n"
@@ -1075,6 +1181,7 @@ static void config_defaults(void)
     g_accel = 0.40f;
     g_invert_y = INVERT_MOUSE_Y != 0;
     g_aim_toggle = AIM_TOGGLE != 0;
+    g_hide = true;
 }
 
 static void ini_bad(const char *key, const char *val)
@@ -1092,6 +1199,7 @@ static void ini_apply(const char *key, const char *val)
     if (kbm_streq(key, "zona_muerta")) { g_deadzone = kbm_clampf(parse_float(val), 0.0f, 0.60f); return; }
     if (kbm_streq(key, "curva"))       { g_accel = kbm_clampf(parse_float(val), 0.0f, 3.0f); return; }
     if (kbm_streq(key, "invertir_y"))  { g_invert_y = parse_float(val) != 0.0f; return; }
+    if (kbm_streq(key, "ocultar")) { g_hide = parse_float(val) != 0.0f; return; }
     if (kbm_streq(key, "alternar_mira")) { g_aim_toggle = parse_float(val) != 0.0f; return; }
 
     uint16_t *kp = NULL;
@@ -1283,16 +1391,25 @@ static void ini_mark_seen(void)
     g_ini_hash_ok = true;
 }
 
+static uint32_t kbm_bl(uint32_t v)   /* numero de bits de v (0 si v == 0) */
+{
+    uint32_t n = 0;
+    while (v) { n++; v >>= 1; }
+    return n;
+}
+
 static void status_publish(void)
 {
     static uint32_t last_sig = 0xFFFFFFFFu;
     uint32_t sig = (g_enabled ? 1u : 0u) | (g_drive ? 2u : 0u) |
                    (g_kb >= 0 ? 4u : 0u) | (g_mouse >= 0 ? 8u : 0u) |
-                   ((uint32_t)(g_sens_x * 10.0f) << 8);
+                   ((uint32_t)g_hide_state << 4) |
+                   ((uint32_t)(g_sens_x * 10.0f) << 8) |
+                   (kbm_bl(g_dbg_mmove) << 18) | (kbm_bl(g_dbg_stick) << 24);
     if (sig == last_sig)
         return;
     last_sig = sig;
-    char s[200];
+    char s[280];
     s[0] = 0;
     kbm_cat(s, sizeof(s), "version=");   kbm_cat_u(s, sizeof(s), KBM_VERSION);
     kbm_cat(s, sizeof(s), "\nactivo=");   kbm_cat_u(s, sizeof(s), g_enabled ? 1 : 0);
@@ -1301,6 +1418,9 @@ static void status_publish(void)
     kbm_cat(s, sizeof(s), "\nraton=");    kbm_cat_u(s, sizeof(s), g_mouse >= 0 ? 1 : 0);
     kbm_cat(s, sizeof(s), "\nsens=");     cat_f1(s, sizeof(s), g_sens_x);
     kbm_cat(s, sizeof(s), "\naviso=");    kbm_cat_u(s, sizeof(s), (uint32_t)g_notify_rc);
+    kbm_cat(s, sizeof(s), "\nocultar=");  kbm_cat_u(s, sizeof(s), (uint32_t)g_hide_state);
+    kbm_cat(s, sizeof(s), "\nraton_mov="); kbm_cat_u(s, sizeof(s), g_dbg_mmove);
+    kbm_cat(s, sizeof(s), "\nstick_der="); kbm_cat_u(s, sizeof(s), g_dbg_stick);
     kbm_cat(s, sizeof(s), "\n");
     upd_write_small(KBM_STATUS_PATH, s, kbm_len(s));
 }
@@ -1378,6 +1498,7 @@ static void ensure_input(void)
     }
 
     note("kbm_pad: paso 4 (librerias resueltas)");
+    hide_devices();
     open_devices(true);
     g_ready = true;   /* aunque falte algun dispositivo: poll_devices lo reintenta */
 }
@@ -1488,6 +1609,8 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
+            if (mb.m.xAxis || mb.m.yAxis)
+                g_dbg_mmove++;
             if (mb.m.buttons != g_mbtn) {   /* diagnostico: cambios de botones al log */
                 static int g_btn_notices;
                 if (g_btn_notices < 8) {
@@ -1557,6 +1680,7 @@ static void apply_kbm(KbmPadData *d)
         if (cx != 0.0f || cy != 0.0f) {
             d->rightStick.x = to_axis(cx);
             d->rightStick.y = to_axis(cy);
+            g_dbg_stick++;
         }
     }
 
