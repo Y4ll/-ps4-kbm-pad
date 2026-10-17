@@ -509,7 +509,7 @@ static void draw_all(const char *busy) {
     if (g_bg) memcpy(FB, g_bg, (size_t)SCREEN_W * SCREEN_H * 4);
     else fill(0, 0, SCREEN_W, SCREEN_H, RGB(20, 27, 50));
     const uint32_t PANEL = RGB(38, 48, 74), PANEL2 = RGB(70, 84, 116), LINE = RGB(66, 80, 118), BLUE = RGB(110, 160, 255);
-    bool on = S.prx && (S.activo < 0 ? 1 : S.activo);
+    bool on = S.prx && S.listed && S.activo != 0;
 
     // ----- cabecera (zona segura: 96 px a los lados, 54 arriba)
     for (int j = 0; j < 96; j++)
@@ -536,7 +536,7 @@ static void draw_all(const char *busy) {
     const char *st = !S.prx ? "NO INSTALADO" : (on ? "ACTIVADO" : "DESACTIVADO");
     uint32_t stc = !S.prx ? C_WARN : (on ? BLUE : RGB(190, 196, 210));
     text(HX + 50, HY + 92, st, 5, stc);
-    const char *sub = !S.prx ? "Pulsa X para instalar el plugin" : (on ? "Listo: abre un juego y usa el teclado" : "En pausa: el mando funciona normal");
+    const char *sub = !S.prx ? "Pulsa X para instalar el plugin" : (on ? "Listo: abre un juego y usa el teclado" : "Apagado: el plugin no se carga al abrir un juego");
     text(HX + 50, HY + 196, sub, 2, C_DIM);
     // interruptor grande
     {
@@ -647,10 +647,15 @@ int main() {
         if (press & BTN_SQUARE) {
             if (!S.prx) say(C_WARN, "Primero instala el plugin (X).");
             else {
-                int now = S.activo < 0 ? 1 : S.activo;
-                if (ini_set_activo(now ? 0 : 1)) say(now ? C_WARN : C_OK, now ? "Modo teclado+raton DESACTIVADO" : "Modo teclado+raton ACTIVADO");
-                else say(C_BAD, "No pude escribir kbm_pad.ini");
+                // Activar/desactivar = poner/quitar la linea del plugin en plugins.ini (el .prx se conserva).
+                bool nowOn = S.listed && S.activo != 0;
+                bool ok;
+                if (nowOn) ok = plugins_ini_remove();
+                else ok = plugins_ini_add() && ini_set_activo(1);
                 refresh();
+                if (!ok) say(C_BAD, "No pude escribir plugins.ini");
+                else if (nowOn) say(C_WARN, "DESACTIVADO (quitado de plugins.ini). Abre el juego de nuevo.");
+                else say(C_OK, "ACTIVADO (puesto en plugins.ini). Abre el juego de nuevo.");
             }
         }
         if (press & BTN_TRIANGLE) {
