@@ -1626,8 +1626,21 @@ static void apply_kbm(KbmPadData *d)
 {
     OrbisKeyboardData kd;
     kbm_zero(&kd, sizeof(kd));
-    if (g_kb >= 0 && p_kbRead && p_kbRead(g_kb, &kd) < 0)
-        kbm_zero(&kd, sizeof(kd));
+    if (g_kb >= 0 && p_kbRead) {
+        static int kb_err_logged, kb_key_logged;
+        int32_t krc = p_kbRead(g_kb, &kd);
+        if (krc < 0) {
+            if (kb_err_logged < 3) {
+                kb_err_logged++;
+                lb_s("[kbm_pad] teclado: lectura fallo rc="); lb_d(krc); lb_s("\n"); lb_flush();
+            }
+            kbm_zero(&kd, sizeof(kd));
+        } else if (kd.nkeys > 0 && kb_key_logged < 5) {
+            kb_key_logged++;
+            lb_s("[kbm_pad] teclado: lectura OK, teclas="); lb_d(kd.nkeys);
+            lb_s(" ocultar="); lb_d(g_hide_state); lb_s("\n"); lb_flush();
+        }
+    }
 
     /* Teclas de control (flanco de subida) */
     static bool e_pause, e_drive, e_up, e_dn, e_reload;
