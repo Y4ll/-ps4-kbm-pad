@@ -1242,7 +1242,10 @@ static void open_devices(bool first)
     else if (g_kb >= 0)             kbm_cat(msg, sizeof(msg), "teclado listo (conecta el raton)");
     else if (g_mouse >= 0)          kbm_cat(msg, sizeof(msg), "raton listo (conecta el teclado)");
     else                            kbm_cat(msg, sizeof(msg), "conecta teclado y raton");
-    notify(msg);
+    if (first && g_kb >= 0 && g_mouse >= 0)
+        note(msg);          /* todo listo al arrancar: sin aviso extra en pantalla (solo al log) */
+    else
+        notify(msg);        /* falta un dispositivo, o se acaba de conectar uno */
 }
 
 /* ---------------------------------------------- CONTROL DESDE LA APP
@@ -1338,7 +1341,7 @@ static void poll_devices(void)
         kbm_cat_u(m, sizeof(m), KBM_VERSION);
         kbm_cat(m, sizeof(m), g_kb >= 0 ? ": teclado SI" : ": teclado NO");
         kbm_cat(m, sizeof(m), g_mouse >= 0 ? ", raton SI" : ", raton NO");
-        notify(m);
+        note(m);            /* diagnostico: solo al log, sin aviso en pantalla */
     }
     static int tick;
     if (g_kb >= 0 && g_mouse >= 0)
