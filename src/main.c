@@ -504,7 +504,9 @@ static bool    g_failed;
 static bool    g_enabled = true;
 static int32_t g_kb = -1;
 static int32_t g_mouse = -1;
-static bool     g_hide = true;          /* ini: ocultar=1 -> el juego no ve el teclado ni el raton */
+static int32_t g_mouse2 = -1;           /* segundo handle del raton (otro indice USB), -1 si no hay */
+static uint8_t g_open_zero[8];          /* parametros de apertura: 8 bytes en cero, como en las apps que si lo abren */
+static bool     g_hide = true;         /* ini: ocultar=1 -> el juego no ve el teclado ni el raton */
 static bool     g_hide_done;
 static int      g_hide_state;           /* 0 = apagado, 1 = activo, 2 = parcial o no se pudo */
 static uint32_t g_dbg_mmove, g_dbg_stick;   /* diagnostico: muestras con movimiento / veces que el stick derecho se movio */
@@ -1334,14 +1336,29 @@ static void open_devices(bool first)
     }
     if (g_mouse < 0 && p_mInit && p_mOpen) {
         p_mInit();
-        g_mouse = p_mOpen(g_user, 0, 0, NULL);
+        /* El raton puede estar en el indice 0 o 1 segun el receptor USB: se abren los dos
+         * y se guardan los handles que abran bien. Parametros: 8 bytes en cero. */
+        for (int32_t idx = 0; idx < 2; idx++) {
+            int32_t h = p_mOpen(g_user, 0, idx, g_open_zero);
+            lb_s("[kbm_pad] sceMouseOpen indice="); lb_d(idx); lb_s(" -> "); lb_d(h); lb_s("\n"); lb_flush();
+            if (h < 0)
+                continue;
+            if (g_mouse < 0)
+                g_mouse = h;
+            else if (g_mouse2 < 0)
+                g_mouse2 = h;
+        }
+        if (g_mouse < 0) {      /* respaldo: la apertura antigua con parametro nulo */
+            g_mouse = p_mOpen(g_user, 0, 0, NULL);
+            lb_s("[kbm_pad] sceMouseOpen (param nulo) -> "); lb_d(g_mouse); lb_s("\n"); lb_flush();
+        }
     }
     bool kb_new = !had_kb && g_kb >= 0, m_new = !had_m && g_mouse >= 0;
     if (!kb_new && !m_new && !first)
         return;
 
     lb_s("[kbm_pad] user="); lb_d(g_user); lb_s(" keyboard="); lb_d(g_kb);
-    lb_s(" mouse="); lb_d(g_mouse); lb_s("\n"); lb_flush();
+    lb_s(" mouse="); lb_d(g_mouse); lb_s(" mouse2="); lb_d(g_mouse2); lb_s("\n"); lb_flush();
 
     char msg[96];
     msg[0] = 0;
@@ -1598,14 +1615,22 @@ static void apply_kbm(KbmPadData *d)
     /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
      * sigue como estaba. */
     static uint32_t g_mbtn;
-    if (g_mouse >= 0 && p_mRead) {
+    int32_t mhs[2] = { g_mouse, g_mouse2 };
+    for (int hi = 0; hi < 2 && p_mRead; hi++) {
+        if (mhs[hi] < 0)
+            continue;
         /* Se leen TODAS las muestras pendientes (hasta 256): con pocas por lectura la
          * cola se llenaba y el movimiento iba a saltos. */
         for (int i = 0; i < 256; i++) {
             KbmMouseBuf mb;
             kbm_zero(&mb, sizeof(mb));
-            int32_t n = p_mRead(g_mouse, &mb, 1);
+            int32_t n = p_mRead(mhs[hi], &mb, 1);
             if (n <= 0)
+                break;
+            /* Un indice sin raton devuelve un registro vacio (todo en cero) en cada lectura:
+             * se descarta y se pasa al siguiente handle, sin tocar deltas ni botones. */
+            if (mb.m.timestamp == 0 && !mb.m.connected && !mb.m.buttons &&
+                !mb.m.xAxis && !mb.m.yAxis && !mb.m.wheel)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
