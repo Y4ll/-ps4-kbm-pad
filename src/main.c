@@ -508,6 +508,7 @@ static int32_t g_mouse2 = -1;           /* segundo handle del raton (otro indice
 static uint8_t g_open_zero[8];          /* parametros de apertura: 8 bytes en cero, como en las apps que si lo abren */
 static bool     g_hide = true;         /* ini: ocultar=1 -> el juego no ve el teclado ni el raton */
 static bool     g_hide_done;
+static bool     g_libs_early;           /* las librerias ya se resolvieron y ocultaron en plugin_load */
 static int      g_hide_state;           /* 0 = apagado, 1 = activo, 2 = parcial o no se pudo */
 static uint32_t g_dbg_mmove, g_dbg_stick;   /* diagnostico: muestras con movimiento / veces que el stick derecho se movio */
 static void    *p_kbReadFn;             /* sceKeyboardRead (solo para ocultarlo) */
@@ -1436,6 +1437,7 @@ static void status_publish(void)
     kbm_cat(s, sizeof(s), "\nsens=");     cat_f1(s, sizeof(s), g_sens_x);
     kbm_cat(s, sizeof(s), "\naviso=");    kbm_cat_u(s, sizeof(s), (uint32_t)g_notify_rc);
     kbm_cat(s, sizeof(s), "\nocultar=");  kbm_cat_u(s, sizeof(s), (uint32_t)g_hide_state);
+    kbm_cat(s, sizeof(s), "\nocultar_pronto=");  kbm_cat_u(s, sizeof(s), g_libs_early ? 1 : 0);
     kbm_cat(s, sizeof(s), "\nraton_mov="); kbm_cat_u(s, sizeof(s), g_dbg_mmove);
     kbm_cat(s, sizeof(s), "\nstick_der="); kbm_cat_u(s, sizeof(s), g_dbg_stick);
     kbm_cat(s, sizeof(s), "\n");
@@ -1501,23 +1503,47 @@ static void ensure_input(void)
     config_load();
     ini_mark_seen();
 
-    /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
-     * resuelven por ruta y dlsym. */
-    sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
-    sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
-    note("kbm_pad: paso 3 (sysmodule OK)");
+    /* Si plugin_load ya las resolvio (y enganchó la ocultacion), NO se resuelven otra vez:
+     * dlsym devolveria las funciones originales y pisaria los stubs de los enganches. */
+    if (!g_libs_early) {
+        /* Los sysmodule IDs hacen que el sistema cargue las librerias; despues se
+         * resuelven por ruta y dlsym. */
+        sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
+        sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
+        note("kbm_pad: paso 3 (sysmodule OK)");
 
-    if (!resolve_input_libs()) {
-        L("[kbm_pad] no se pudo resolver teclado ni raton\n");
-        notify("kbm_pad: no se pudo cargar teclado/raton");
-        g_failed = true;
-        return;
+        if (!resolve_input_libs()) {
+            L("[kbm_pad] no se pudo resolver teclado ni raton\n");
+            notify("kbm_pad: no se pudo cargar teclado/raton");
+            g_failed = true;
+            return;
+        }
     }
 
     note("kbm_pad: paso 4 (librerias resueltas)");
-    hide_devices();
+    hide_devices();       /* ya hecho si fue temprano (g_hide_done) */
     open_devices(true);
     g_ready = true;   /* aunque falte algun dispositivo: poll_devices lo reintenta */
+}
+
+/* Se llama desde plugin_load, ANTES de que el juego inicialice su entrada. Asi el juego
+ * llama a sceKeyboardOpen / sceMouseOpen ya enganchadas y nunca llega a ver el teclado ni
+ * el raton (si se enganchaba en la primera lectura del mando, el juego ya los habia
+ * abierto). Solo actua con ocultar=1; con ocultar=0 todo queda como antes. */
+static void early_hide(void)
+{
+    config_load();
+    if (!g_hide)
+        return;
+    sceSysmoduleLoadModule(KBM_SYSMODULE_KEYBOARD);
+    sceSysmoduleLoadModule(KBM_SYSMODULE_MOUSE);
+    if (!resolve_input_libs()) {
+        lb_s("[kbm_pad] ocultar temprano: no se pudieron resolver las librerias\n"); lb_flush();
+        return;     /* ensure_input lo reintenta en la primera lectura del mando */
+    }
+    g_libs_early = true;
+    hide_devices();
+    lb_s("[kbm_pad] ocultar temprano: hecho en plugin_load\n"); lb_flush();
 }
 
 static bool has_key(const OrbisKeyboardData *kd, uint16_t code)
@@ -1834,6 +1860,9 @@ static void kbm_start(void)
         int err = 0;
 #if KBM_STAGE >= 2
         err = install_pad_hooks();
+#endif
+#if KBM_STAGE >= 3
+        early_hide();
 #endif
         hello[0] = 0;
         kbm_cat(hello, sizeof(hello), KBM_NAME);
