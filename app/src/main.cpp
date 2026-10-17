@@ -21,6 +21,9 @@
 #define URL_VERSION  "https://raw.githubusercontent.com/" REPO "/main/VERSION"
 #define URL_RELEASE  "https://github.com/" REPO "/releases/download/v"
 // Archivo directo del repo: mismo servidor que VERSION (funciona en la PS4) y sin redirecciones.
+#define URL_APP_VER  "https://raw.githubusercontent.com/" REPO "/app-dist/APP_VERSION"
+#define URL_APP_PKG  "https://raw.githubusercontent.com/" REPO "/app-dist/kbm_manager.pkg"
+#define DIR_PKG      "/data/pkg"
 #define URL_PRX_RAW  "https://raw.githubusercontent.com/" REPO "/main/dist/kbm_pad.prx"
 
 // ---------------- dibujo ----------------
@@ -324,6 +327,76 @@ static bool prx_header_ok(const char *path, unsigned char h[4]) {
     return n == 4 && h[0] == 0x4F && h[1] == 0x15 && h[2] == 0x3D && h[3] == 0x1D;
 }
 
+// ---------------- actualizacion de la propia app ----------------
+// La PS4 no deja que una app se instale sola: se baja el PKG nuevo a /data/pkg y el usuario lo
+// instala desde Ajustes > Debug Settings > Package Installer (igual que McStore).
+static int ver_cmp(const char *a, const char *b) {
+    int x[3] = {0, 0, 0}, y[3] = {0, 0, 0};
+    sscanf(a, "%d.%d.%d", &x[0], &x[1], &x[2]);
+    sscanf(b, "%d.%d.%d", &y[0], &y[1], &y[2]);
+    for (int i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] > y[i] ? 1 : -1;
+    return 0;
+}
+
+// Un PKG de PS4 empieza por 7F 43 4E 54 ("\x7fCNT").
+static bool pkg_header_ok(const char *path) {
+    unsigned char h[4] = {0, 0, 0, 0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(h, 1, 4, f);
+    fclose(f);
+    return n == 4 && h[0] == 0x7F && h[1] == 0x43 && h[2] == 0x4E && h[3] == 0x54;
+}
+
+// 0 = no se pudo comprobar (sin conexion o sin datos: se ignora), 2 = la app esta al dia,
+// 1 = PKG nuevo listo en /data/pkg (version en `ver`), -1 = fallo al bajarlo (motivo en err).
+static int app_update(char *ver, size_t vercap, char *err, size_t errcap) {
+    char *buf = NULL; long len = 0; char e0[160] = "";
+    int r = plat_https_get(URL_APP_VER, &buf, &len, 64, NULL, NULL, NULL, e0, sizeof(e0));
+    if (r != 200 || !buf) { free(buf); return 0; }
+    char v[32]; size_t n = 0;
+    for (long i = 0; i < len && n + 1 < sizeof(v); i++)
+        if ((buf[i] >= '0' && buf[i] <= '9') || buf[i] == '.') v[n++] = buf[i]; else if (n) break;
+    v[n] = 0;
+    free(buf);
+    if (!n || ver_cmp(v, APP_VERSION) <= 0) return 2;
+
+    plat_mkdir(DIR_PKG);
+    char fin[96], tmp[104];
+    snprintf(fin, sizeof(fin), DIR_PKG "/kbm_manager-%s.pkg", v);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", fin);
+    snprintf(ver, vercap, "%s", v);
+    long sz = 0;
+    if (exists(fin, &sz) && sz > 4000000 && pkg_header_ok(fin)) return 1;   // ya estaba descargado
+
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { snprintf(err, errcap, "no puedo escribir en " DIR_PKG); return -1; }
+    g_dlDone = 0; g_dlTotal = -1;
+    long got = 0;
+    r = plat_https_get(URL_APP_PKG, NULL, &got, 0, f, dl_cb, NULL, err, errcap);
+    if (fclose(f) != 0 && r == 200) { snprintf(err, errcap, "error al guardar el PKG"); r = -3; }
+    if (r == 200 && (got < 4000000 || !pkg_header_ok(tmp))) { snprintf(err, errcap, "PKG no valido (%ld bytes)", got); r = -4; }
+    if (r != 200) { plat_remove(tmp); return -1; }
+    plat_remove(fin);
+    if (plat_rename(tmp, fin) != 0) { snprintf(err, errcap, "no pude guardar el PKG"); plat_remove(tmp); return -1; }
+    plat_chmod(fin);
+    return 1;
+}
+
+// Al abrir la app: borra de /data/pkg los kbm_manager-X.pkg ya instalados (X <= version actual) y restos .tmp.
+static void pkg_cleanup_cb(const char *name, void *) {
+    if (strncmp(name, "kbm_manager-", 12)) return;
+    char v[32]; size_t n = 0;
+    for (const char *q = name + 12; *q && n + 1 < sizeof(v) && ((*q >= '0' && *q <= '9') || *q == '.'); q++) v[n++] = *q;
+    v[n] = 0;
+    if (strstr(name, ".tmp") || ver_cmp(v, APP_VERSION) <= 0) {
+        char p[160];
+        snprintf(p, sizeof(p), DIR_PKG "/%s", name);
+        plat_remove(p);
+    }
+}
+static void pkg_cleanup() { plat_listdir(DIR_PKG, pkg_cleanup_cb, NULL); }
+
 static bool install_plugin() {
     check_latest();  // solo informativo: si falla, igual se intenta la descarga
     plat_mkdir(DIR_GOLDHEN);
@@ -589,13 +662,24 @@ static void draw_all(const char *busy) {
             if (fw >= 12) rrect(140, 704, fw, 12, 6, C_ACC);
         }
     } else {
-        text(140, 668, g_msg[0] ? g_msg : "Listo.", 2, g_msg[0] ? g_msgCol : C_DIM);
+        if (!g_msg[0]) {
+            text(140, 668, "Listo.", 2, C_DIM);
+        } else if (strlen(g_msg) <= 100) {
+            text(140, 668, g_msg, 2, g_msgCol);
+        } else {
+            // dos lineas: se corta en el ultimo espacio dentro de 100 caracteres
+            char l1[112]; int cut = 100;
+            while (cut > 40 && g_msg[cut] != ' ') cut--;
+            memcpy(l1, g_msg, (size_t)cut); l1[cut] = 0;
+            text(140, 652, l1, 2, g_msgCol);
+            text(140, 688, g_msg + cut + (g_msg[cut] == ' ' ? 1 : 0), 2, g_msgCol);
+        }
     }
 
     // ----- botones de accion
     struct Btn { int kind; const char *title; const char *sub; bool enabled; };
     Btn bt[3] = {
-        {0, S.prx ? "Actualizar" : "Instalar", "Descarga desde GitHub", true},
+        {0, S.prx ? "Actualizar" : "Instalar", "Plugin y app", true},
         {1, on ? "Desactivar" : "Activar", "Teclado + raton", S.prx},
         {2, "Desinstalar", "Quita el plugin", S.prx},
     };
@@ -623,6 +707,7 @@ static void draw_all(const char *busy) {
 int main() {
     if (!plat_init()) return 1;
     refresh();
+    pkg_cleanup();
     if (plat_jb_status() != 0) sayd(C_WARN, "Aviso: sin permisos de sistema (jailbreak %d). Puede fallar la escritura.", plat_jb_status());
     uint32_t prev = 0xFFFFFFFFu;
     int frame = 0;
@@ -635,12 +720,32 @@ int main() {
             bool had = S.prx;
             draw_all("Consultando GitHub...");
             plat_present();
-            if (install_plugin()) {
+            bool pok = install_plugin();
+            char pm[120] = "";
+            if (pok) {
                 if (!had) { ini_set_activo(1); }
                 refresh();
-                snprintf(g_msg, sizeof(g_msg), "%s: v%d, %ld bytes%s", had ? "Plugin actualizado" : "Plugin instalado",
+                snprintf(pm, sizeof(pm), "%s: v%d, %ld bytes%s.", had ? "Plugin actualizado" : "Plugin instalado",
                          S.latest, S.prxSize, had ? "" : " (activado)");
+                snprintf(g_msg, sizeof(g_msg), "%s", pm);
                 g_msgCol = C_OK;
+            } else {
+                snprintf(pm, sizeof(pm), "%.115s", g_msg);
+            }
+            // La app tambien se actualiza aqui: si hay version nueva, baja el PKG a /data/pkg.
+            draw_all("Buscando version nueva de la app...");
+            plat_present();
+            char nv[32] = "", ae[160] = "";
+            int ar = app_update(nv, sizeof(nv), ae, sizeof(ae));
+            if (ar == 1) {
+                snprintf(g_msg, sizeof(g_msg), "%s App v%s descargada: instalala en Ajustes > Debug Settings > Package Installer.", pm, nv);
+                g_msgCol = C_WARN;
+            } else if (ar == -1) {
+                snprintf(g_msg, sizeof(g_msg), "%s App nueva v%s: descarga fallida (%s).", pm, nv, ae);
+                g_msgCol = C_BAD;
+            } else if (ar == 2 && pok) {
+                size_t l = strlen(g_msg);
+                snprintf(g_msg + l, sizeof(g_msg) - l, " App al dia (v%s).", APP_VERSION);
             }
             refresh();
         }

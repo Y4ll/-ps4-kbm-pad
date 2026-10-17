@@ -49,6 +49,19 @@ jobs:
           name: kbm_manager-PKG
           path: app/*.pkg
 
+      - name: Publicar PKG en la rama app-dist (de ahi se actualiza la app)
+        run: |
+          d=$(mktemp -d)
+          cp app/*.pkg "$d/kbm_manager.pkg"
+          echo "$APP_VER" > "$d/APP_VERSION"
+          cd "$d"
+          git init -q -b app-dist
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "kbm_manager v$APP_VER (PKG para la auto-actualizacion de la app)"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" app-dist
+
       - name: Publicar PKG en Releases (tag manager)
         run: |
           cp app/*.pkg kbm_manager.pkg
