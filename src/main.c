@@ -1837,7 +1837,15 @@ static int32_t scePadRead_hook(int32_t handle, KbmPadData *data, int32_t count)
     }
     if (ret > count)
         ret = count;
-    apply_kbm(&data[ret - 1]);   /* la muestra mas reciente */
+    apply_kbm(&data[ret - 1]);   /* la muestra mas reciente (consume el raton una sola vez) */
+    /* Con varias muestras pendientes, el juego puede quedarse con cualquiera: copiamos la
+     * entrada inyectada a todas para no soltar botones ni centrar los sticks entre medias. */
+    for (int32_t i = 0; i < ret - 1; i++) {
+        data[i].buttons = data[ret - 1].buttons;
+        data[i].leftStick = data[ret - 1].leftStick;
+        data[i].rightStick = data[ret - 1].rightStick;
+        data[i].analogButtons = data[ret - 1].analogButtons;
+    }
     return ret;
 }
 #endif /* KBM_STAGE >= 3 */
