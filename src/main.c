@@ -1416,16 +1416,39 @@ static uint32_t kbm_bl(uint32_t v)   /* numero de bits de v (0 si v == 0) */
     return n;
 }
 
-static void status_publish(void)
+/* Escribe kbm_pad.status y deja el resultado en el log (las primeras veces, o siempre que
+ * falle): asi, si el archivo no aparece en la consola, el log dice si fallo open() o write(). */
+static void status_write(const char *text, size_t n)
+{
+    static int logged;
+    int32_t fd = kbm_sys_open(KBM_STATUS_PATH, 0x0001 | 0x0200 | 0x0400, 0666);   /* WRONLY|CREAT|TRUNC */
+    int64_t w = -1;
+    if (fd >= 0) {
+        w = kbm_sys_write(fd, text, n);
+        kbm_sys_close(fd);
+    }
+    bool bad = fd < 0 || w != (int64_t)n;
+    if ((logged < 3 || bad) && logged < 12) {
+        logged++;
+        lb_s("[kbm_pad] estado: open="); lb_d(fd); lb_s(" write="); lb_d((int32_t)w);
+        lb_s(" de "); lb_d((int32_t)n); lb_s(bad ? " FALLO\n" : " OK\n"); lb_flush();
+    }
+}
+
+/* force = true escribe aunque nada haya cambiado. Ademas, aunque nada cambie, se reescribe
+ * cada ~30 s (15 llamadas desde external_poll): si el archivo se borra por FTP reaparece. */
+static void status_publish(bool force)
 {
     static uint32_t last_sig = 0xFFFFFFFFu;
+    static int beat;
     uint32_t sig = (g_enabled ? 1u : 0u) | (g_drive ? 2u : 0u) |
                    (g_kb >= 0 ? 4u : 0u) | (g_mouse >= 0 ? 8u : 0u) |
                    ((uint32_t)g_hide_state << 4) |
                    ((uint32_t)(g_sens_x * 10.0f) << 8) |
                    (kbm_bl(g_dbg_mmove) << 18) | (kbm_bl(g_dbg_stick) << 24);
-    if (sig == last_sig)
+    if (!force && sig == last_sig && ++beat < 15)
         return;
+    beat = 0;
     last_sig = sig;
     char s[280];
     s[0] = 0;
@@ -1441,7 +1464,7 @@ static void status_publish(void)
     kbm_cat(s, sizeof(s), "\nraton_mov="); kbm_cat_u(s, sizeof(s), g_dbg_mmove);
     kbm_cat(s, sizeof(s), "\nstick_der="); kbm_cat_u(s, sizeof(s), g_dbg_stick);
     kbm_cat(s, sizeof(s), "\n");
-    upd_write_small(KBM_STATUS_PATH, s, kbm_len(s));
+    status_write(s, kbm_len(s));
 }
 
 static void external_poll(void)
@@ -1461,7 +1484,7 @@ static void external_poll(void)
     }
     g_ini_hash = h;
     g_ini_hash_ok = true;
-    status_publish();
+    status_publish(false);
 }
 
 /* Deteccion automatica: si falta algun dispositivo se reintenta abrirlo cada ~2 s,
@@ -1524,6 +1547,7 @@ static void ensure_input(void)
     hide_devices();       /* ya hecho si fue temprano (g_hide_done) */
     open_devices(true);
     g_ready = true;   /* aunque falte algun dispositivo: poll_devices lo reintenta */
+    status_publish(true);   /* el archivo existe desde el primer segundo, no a los ~2 s */
 }
 
 /* Se llama desde plugin_load, ANTES de que el juego inicialice su entrada. Asi el juego
