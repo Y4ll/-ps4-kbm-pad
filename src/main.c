@@ -1664,6 +1664,13 @@ static void kbm_start(void)
 {
     if (g_hooked)
         return;
+    /* Con la linea en [default] de plugins.ini GoldHEN carga el plugin en TODAS las apps,
+     * tambien en la app kbm_manager (se reconoce por /app0/Media/jb.prx). Alli no debe
+     * enganchar el mando, ni abrir red ni actualizarse: pisaria a la propia app. */
+    if (upd_exists("/app0/Media/jb.prx")) {
+        lb_s("[kbm_pad] app kbm_manager detectada: el plugin no se activa aqui\n"); lb_flush();
+        return;
+    }
     g_hooked = true;
     lb_s("["); lb_s(KBM_NAME); lb_s("] cargado ("); lb_s(kbm_relro_anchor[0]);
     lb_s(", etapa "); lb_d(KBM_STAGE); lb_s(")\n"); lb_flush();
