@@ -358,6 +358,8 @@ extern int32_t kbm_send_notification(int32_t device, KbmNotifyRequest *req,
                                      size_t size, int32_t blocking)
     __asm__("sceKernelSendNotificationRequest");
 
+static int32_t g_notify_rc = 0x7FFFFFFF;   /* resultado del ultimo aviso (se publica en kbm_pad.status) */
+
 static void notify(const char *msg)
 {
     KbmNotifyRequest req;
@@ -369,6 +371,7 @@ static void notify(const char *msg)
     kbm_copy(req.icon_image_uri, sizeof(req.icon_image_uri),
              "cxml://psnotification/tex_icon_system");
     int32_t r = kbm_send_notification(0, &req, sizeof(req), 0);
+    g_notify_rc = r;
     lb_s("[kbm_pad] aviso \""); lb_s(msg); lb_s("\" -> "); lb_d(r); lb_s("\n"); lb_flush();
 }
 
@@ -1286,7 +1289,7 @@ static void status_publish(void)
     if (sig == last_sig)
         return;
     last_sig = sig;
-    char s[160];
+    char s[200];
     s[0] = 0;
     kbm_cat(s, sizeof(s), "version=");   kbm_cat_u(s, sizeof(s), KBM_VERSION);
     kbm_cat(s, sizeof(s), "\nactivo=");   kbm_cat_u(s, sizeof(s), g_enabled ? 1 : 0);
@@ -1294,6 +1297,7 @@ static void status_publish(void)
     kbm_cat(s, sizeof(s), "\nteclado=");  kbm_cat_u(s, sizeof(s), g_kb >= 0 ? 1 : 0);
     kbm_cat(s, sizeof(s), "\nraton=");    kbm_cat_u(s, sizeof(s), g_mouse >= 0 ? 1 : 0);
     kbm_cat(s, sizeof(s), "\nsens=");     cat_f1(s, sizeof(s), g_sens_x);
+    kbm_cat(s, sizeof(s), "\naviso=");    kbm_cat_u(s, sizeof(s), (uint32_t)g_notify_rc);
     kbm_cat(s, sizeof(s), "\n");
     upd_write_small(KBM_STATUS_PATH, s, kbm_len(s));
 }
@@ -1323,6 +1327,19 @@ static void external_poll(void)
 static void poll_devices(void)
 {
     external_poll();
+    /* Segundo aviso, unos segundos despues de que el juego empiece a leer el mando
+     * (~300 lecturas): confirma que el enganche funciona y si hay teclado y raton. */
+    static int late;
+    if (late >= 0 && ++late >= 300) {
+        late = -1;
+        char m[96];
+        m[0] = 0;
+        kbm_cat(m, sizeof(m), KBM_NAME " v");
+        kbm_cat_u(m, sizeof(m), KBM_VERSION);
+        kbm_cat(m, sizeof(m), g_kb >= 0 ? ": teclado SI" : ": teclado NO");
+        kbm_cat(m, sizeof(m), g_mouse >= 0 ? ", raton SI" : ", raton NO");
+        notify(m);
+    }
     static int tick;
     if (g_kb >= 0 && g_mouse >= 0)
         return;
