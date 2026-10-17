@@ -79,6 +79,7 @@ static bool write_file(const char *path, const char *data, long len) {
     if (!f) return false;
     bool ok = fwrite(data, 1, (size_t)len, f) == (size_t)len;
     fclose(f);
+    plat_chmod(path);
     return ok;
 }
 
@@ -308,6 +309,7 @@ static int download_prx(const char *url, long *bytes, char *err, size_t errcap) 
     long got = 0;
     int r = plat_https_get(url, NULL, &got, 0, f, dl_cb, NULL, err, errcap);
     if (fclose(f) != 0 && r == 200) { snprintf(err, errcap, "error al guardar el archivo"); r = -3; }
+    plat_chmod(PRX_TMP);
     if (bytes) *bytes = got;
     if (r != 200) plat_remove(PRX_TMP);
     return r;
@@ -326,6 +328,8 @@ static bool install_plugin() {
     check_latest();  // solo informativo: si falla, igual se intenta la descarga
     plat_mkdir(DIR_GOLDHEN);
     plat_mkdir(DIR_PLUGINS);
+    plat_chmod(DIR_GOLDHEN);
+    plat_chmod(DIR_PLUGINS);
     // 1) archivo directo del repo (el mismo servidor que ya responde para VERSION)
     // 2) respaldo: asset de la release (GitHub lo redirige a otro servidor)
     char rel[200] = "";
@@ -352,6 +356,7 @@ static bool install_plugin() {
     }
     plat_remove(PRX_PATH);
     if (plat_rename(PRX_TMP, PRX_PATH) != 0) { say(C_BAD, "No pude guardar kbm_pad.prx"); return false; }
+    plat_chmod(PRX_PATH);
     if (!plugins_ini_add()) { say(C_BAD, "Plugin guardado, pero no pude editar plugins.ini"); return false; }
     return true;
 }
@@ -632,8 +637,10 @@ int main() {
             plat_present();
             if (install_plugin()) {
                 if (!had) { ini_set_activo(1); }
-                if (S.latest > 0) sayd(C_OK, had ? "Plugin actualizado a v%d" : "Plugin instalado: v%d (activado)", S.latest);
-                else say(C_OK, had ? "Plugin actualizado" : "Plugin instalado (activado)");
+                refresh();
+                snprintf(g_msg, sizeof(g_msg), "%s: v%d, %ld bytes%s", had ? "Plugin actualizado" : "Plugin instalado",
+                         S.latest, S.prxSize, had ? "" : " (activado)");
+                g_msgCol = C_OK;
             }
             refresh();
         }

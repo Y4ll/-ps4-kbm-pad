@@ -239,6 +239,7 @@ bool plat_stat(const char *path, bool *isDir, long *size) {
     return true;
 }
 
+void plat_chmod(const char *path) { sceKernelChmod(path, 0777); }
 int plat_mkdir(const char *path) { return sceKernelMkdir(path, 0777) < 0 ? -1 : 0; }
 int plat_remove(const char *path) { return sceKernelUnlink(path) < 0 ? -1 : 0; }
 int plat_rename(const char *from, const char *to) { return sceKernelRename(from, to) < 0 ? -1 : 0; }
