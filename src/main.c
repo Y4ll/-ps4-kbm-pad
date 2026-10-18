@@ -162,7 +162,7 @@ static int32_t (*p_mRead)(int32_t handle, void *data, int32_t count);
 #define MOUSE_BTN_LEFT  0x1
 #define MOUSE_BTN_RIGHT 0x2
 
-#define KBM_BUILD "build-cfg-5"   /* marca para saber que .prx esta cargado */
+#define KBM_BUILD "kbfix-1"   /* marca para saber que .prx esta cargado */
 
 /* Etapas para diagnosticar (se eligen con -DKBM_STAGE=n desde el Makefile):
  *   1  solo aviso y log (sin enganches ni entrada)
@@ -503,6 +503,7 @@ static bool    g_ready;
 static bool    g_failed;
 static bool    g_enabled = true;
 static int32_t g_kb = -1;
+static int32_t g_kb2 = -1;              /* segundo handle del teclado (otro indice USB), -1 si no hay */
 static int32_t g_mouse = -1;
 static int32_t g_mouse2 = -1;           /* segundo handle del raton (otro indice USB), -1 si no hay */
 static uint8_t g_open_zero[8];          /* parametros de apertura: 8 bytes en cero, como en las apps que si lo abren */
@@ -589,14 +590,10 @@ static bool resolve_input_libs(void)
 #define KBM_NO_DEVICE ((int32_t)0x80DF0006)
 
 static Detour g_dt_kbOpen  = { DetourMode_x64 };
-static Detour g_dt_kbState = { DetourMode_x64 };
-static Detour g_dt_kbRead  = { DetourMode_x64 };
 static Detour g_dt_mOpen   = { DetourMode_x64 };
 static Detour g_dt_mRead   = { DetourMode_x64 };
 
 static int32_t kb_open_hide(int32_t u, int32_t t, int32_t i, void *p) { (void)u; (void)t; (void)i; (void)p; return KBM_NO_DEVICE; }
-static int32_t kb_state_hide(int32_t h, void *d) { (void)h; (void)d; return KBM_NO_DEVICE; }
-static int32_t kb_read_hide(int32_t h, void *d, int32_t n) { (void)h; (void)d; (void)n; return 0; }
 static int32_t m_open_hide(int32_t u, int32_t t, int32_t i, void *p) { (void)u; (void)t; (void)i; (void)p; return KBM_NO_DEVICE; }
 static int32_t m_read_hide(int32_t h, void *d, int32_t n) { (void)h; (void)d; (void)n; return 0; }
 
@@ -648,16 +645,10 @@ static void hide_devices(void)
         s = hide_one(&g_dt_kbOpen, (void *)p_kbOpen, (void *)kb_open_hide, "sceKeyboardOpen");
         if (s) { p_kbOpen = (int32_t (*)(int32_t, int32_t, int32_t, void *))s; ok++; }
     }
-    if (p_kbRead) {
-        want++;
-        s = hide_one(&g_dt_kbState, (void *)p_kbRead, (void *)kb_state_hide, "sceKeyboardReadState");
-        if (s) { p_kbRead = (int32_t (*)(int32_t, OrbisKeyboardData *))s; ok++; }
-    }
-    if (p_kbReadFn) {
-        want++;
-        s = hide_one(&g_dt_kbRead, p_kbReadFn, (void *)kb_read_hide, "sceKeyboardRead");
-        if (s) ok++;     /* el plugin no usa sceKeyboardRead: no hace falta guardar el stub */
-    }
+    /* Teclado: SOLO se oculta la apertura. Con sceKeyboardOpen devolviendo "sin dispositivo"
+     * el juego no consigue handle y no puede leer nada. Las funciones de lectura
+     * (sceKeyboardReadState / sceKeyboardRead) NO se enganchan: el plugin las usa tal cual,
+     * sin pasar por un trampolin (sospecha del fallo "el raton funciona pero el teclado no"). */
     if (p_mOpen) {
         want++;
         s = hide_one(&g_dt_mOpen, (void *)p_mOpen, (void *)m_open_hide, "sceMouseOpen");
@@ -1333,7 +1324,24 @@ static void open_devices(bool first)
     bool had_kb = g_kb >= 0, had_m = g_mouse >= 0;
     if (g_kb < 0 && p_kbInit && p_kbOpen) {
         p_kbInit();
-        g_kb = p_kbOpen(g_user, 0, 0, NULL);
+        /* La apertura que funcionaba (indice 0, parametro nulo) va primero. Despues, como
+         * con el raton, se prueban los parametros en cero y el indice 1 (receptor USB
+         * combinado): cada handle valido y distinto se guarda y se lee. Todo va al log. */
+        static const int32_t tries[4][2] = { {0, 0}, {0, 1}, {1, 1}, {1, 0} };  /* {indice, con_params} */
+        int32_t found[2] = { -1, -1 };
+        int nf = 0;
+        for (int k = 0; k < 4 && nf < 2; k++) {
+            int32_t h = p_kbOpen(g_user, 0, tries[k][0], tries[k][1] ? (void *)g_open_zero : NULL);
+            lb_s("[kbm_pad] sceKeyboardOpen indice="); lb_d(tries[k][0]);
+            lb_s(tries[k][1] ? " params=cero -> " : " params=nulo -> "); lb_d(h); lb_s("\n"); lb_flush();
+            if (h < 0)
+                continue;
+            if (nf == 1 && h == found[0])
+                continue;
+            found[nf++] = h;
+        }
+        g_kb = found[0];
+        g_kb2 = found[1];
     }
     if (g_mouse < 0 && p_mInit && p_mOpen) {
         p_mInit();
@@ -1359,7 +1367,7 @@ static void open_devices(bool first)
         return;
 
     lb_s("[kbm_pad] user="); lb_d(g_user); lb_s(" keyboard="); lb_d(g_kb);
-    lb_s(" mouse="); lb_d(g_mouse); lb_s(" mouse2="); lb_d(g_mouse2); lb_s("\n"); lb_flush();
+    lb_s(" keyboard2="); lb_d(g_kb2); lb_s(" mouse="); lb_d(g_mouse); lb_s(" mouse2="); lb_d(g_mouse2); lb_s("\n"); lb_flush();
 
     char msg[96];
     msg[0] = 0;
@@ -1639,6 +1647,16 @@ static void apply_kbm(KbmPadData *d)
             kb_key_logged++;
             lb_s("[kbm_pad] teclado: lectura OK, teclas="); lb_d(kd.nkeys);
             lb_s(" ocultar="); lb_d(g_hide_state); lb_s("\n"); lb_flush();
+        }
+    }
+
+    if (g_kb2 >= 0 && p_kbRead) {       /* segundo handle: se suman sus teclas y modificadores */
+        OrbisKeyboardData k2;
+        kbm_zero(&k2, sizeof(k2));
+        if (p_kbRead(g_kb2, &k2) >= 0) {
+            kd.mods |= k2.mods;
+            for (int i = 0; i < k2.nkeys && i < 32 && kd.nkeys < 32; i++)
+                kd.keycodes[kd.nkeys++] = k2.keycodes[i];
         }
     }
 
