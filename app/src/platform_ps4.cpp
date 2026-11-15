@@ -209,8 +209,8 @@ static void *sym_from(const char *name, const char *fn) {
 static void usb_load() {
     if (g_usbLoaded) return;
     g_usbLoaded = true;
-    sceSysmoduleLoadModule(0x0106);   // teclado
-    sceSysmoduleLoadModule(0x00A9);   // raton
+    sceSysmoduleLoadModule((OrbisSysModule)0x0106);   // teclado
+    sceSysmoduleLoadModule((OrbisSysModule)0x00A9);   // raton
     kbInit = (int (*)(void))sym_from("libSceKeyboard.sprx", "sceKeyboardInit");
     kbOpen = (int (*)(int, int, int, void *))sym_from("libSceKeyboard.sprx", "sceKeyboardOpen");
     kbRead = (int (*)(int, void *))sym_from("libSceKeyboard.sprx", "sceKeyboardReadState");
