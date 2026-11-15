@@ -285,6 +285,7 @@ static void refresh() {
 }
 
 static void draw_all(const char *title2 = NULL);
+static void draw_cursor();
 
 static bool check_latest() {
     char *buf = NULL; long len = 0; char err[160] = "";
@@ -623,17 +624,17 @@ static void draw_all(const char *busy) {
     glyph(1, HX + 78, HY + 280, 26, !S.prx);
     text(HX + 124, HY + 264, S.prx ? "Activar / desactivar" : "Instala el plugin primero", 2, S.prx ? C_TXT : C_DIM);
     hspan(HX + 50, HX + HW - 50, HY + 322, LINE, 255);
-    if (S.teclado >= 0) {
+    {
         int cx = HX + 50;
+        int dv = plat_devices();
         for (int i = 0; i < 2; i++) {
-            int ok = i == 0 ? S.teclado : S.raton;
+            bool ok = (dv >> i) & 1;
             rrect(cx, HY + 340, 270, 60, 30, PANEL2);
             disc(cx + 34, HY + 370, 11, ok ? C_OK : C_BAD);
             text(cx + 62, HY + 354, i == 0 ? (ok ? "Teclado OK" : "Teclado no") : (ok ? "Raton OK" : "Raton no"), 2, C_TXT);
             cx += 294;
         }
-    } else {
-        text(HX + 50, HY + 354, "Abre un juego para detectar teclado y raton", 2, C_DIM);
+        if (!dv) text(HX + 50 + 2 * 294 - 40, HY + 354, "USB?", 2, C_DIM);
     }
 
     // ----- tarjeta de estado
@@ -691,7 +692,7 @@ static void draw_all(const char *busy) {
         text(bx + 144, by + 24, bt[i].title, 3, bt[i].enabled ? C_TXT : RGB(120, 128, 150));
         text(bx + 144, by + 80, bt[i].sub, 2, bt[i].enabled ? C_DIM : RGB(100, 108, 130));
     }
-    text(96, 898, "OPTIONS: ajustes de camara, teclas y raton.   Tras cambiar algo, abre el juego de nuevo.", 2, RGB(150, 160, 185));
+    text(96, 898, (plat_devices() & 1) ? "O: ajustes   I: instalar   A: activar/desactivar   U: desinstalar   Esc: salir" : "OPTIONS: ajustes de camara, teclas y raton.   Tras cambiar algo, abre el juego de nuevo.", 2, RGB(150, 160, 185));
 
     // ----- barra inferior con las teclas del juego y Salir
     rrect(96, 940, 1728, 76, 22, RGB(30, 38, 62));
@@ -702,6 +703,22 @@ static void draw_all(const char *busy) {
     keycap_label(kx, 956, "F6", "Recargar");
     glyph(3, 1824 - 40 - text_w("Salir", 2) - 44, 978, 22, false);
     text_r(1824 - 40, 962, "Salir", 2, C_TXT);
+    draw_cursor();
+}
+
+// Cursor del raton (flecha blanca con borde negro).
+static void draw_cursor() {
+    const PlatPointer *p = plat_pointer();
+    if (!p->active) return;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int r = 0; r < 22; r++) {
+            int w = r <= 15 ? r * 11 / 20 + 2 : 5;
+            int x0 = pass == 0 ? p->x - 1 : p->x;
+            int ww = pass == 0 ? w + 2 : w;
+            int rows = pass == 0 ? 3 : 1;
+            fill(x0, p->y + r - (pass == 0 ? 1 : 0), ww, rows, pass == 0 ? RGB(10, 12, 20) : RGB(250, 250, 255));
+        }
+    }
 }
 
 #include "settings.h"
@@ -717,6 +734,16 @@ int main() {
         uint32_t b = plat_buttons();
         uint32_t press = b & ~prev;
         prev = b;
+        const PlatPointer *mp = plat_pointer();
+        if (mp->leftPressed) {   // clics del raton sobre los botones de la pantalla
+            int mx = mp->x, my = mp->y;
+            for (int i = 0; i < 3; i++)
+                if (mx >= 96 + i * 584 && mx < 96 + i * 584 + 560 && my >= 760 && my < 884)
+                    press |= i == 0 ? BTN_CROSS : (i == 1 ? BTN_SQUARE : BTN_TRIANGLE);
+            if (mx >= 770 && mx < 990 && my >= 224 && my < 332) press |= BTN_SQUARE;
+            if (mx >= 96 && mx < 1500 && my >= 890 && my < 930) press |= BTN_OPTIONS;
+            if (mx >= 1500 && my >= 940 && my < 1016) press |= BTN_CIRCLE;
+        }
         if (press & BTN_CIRCLE) break;
         if (press & BTN_CROSS) {
             bool had = S.prx;

@@ -124,6 +124,29 @@ static const char *const CF_BTNS[] = {
 };
 #define CF_NBTNS ((int)(sizeof(CF_BTNS) / sizeof(CF_BTNS[0])))
 
+// Codigo HID del teclado -> nombre que entiende el plugin (NULL si no esta soportada).
+static const char *cf_hid_name(int code, char *buf) {
+    if (code >= 4 && code <= 29) { buf[0] = (char)('a' + code - 4); buf[1] = 0; return buf; }
+    if (code >= 30 && code <= 38) { buf[0] = (char)('1' + code - 30); buf[1] = 0; return buf; }
+    if (code == 39) return "0";
+    if (code >= 58 && code <= 69) { snprintf(buf, 8, "f%d", code - 57); return buf; }
+    switch (code) {
+    case 44: return "espacio";
+    case 40: return "enter";
+    case 43: return "tab";
+    case 42: return "borrar";
+    case 57: return "caps";
+    case 82: return "flecha_arriba";
+    case 81: return "flecha_abajo";
+    case 80: return "flecha_izq";
+    case 79: return "flecha_der";
+    case 0x122: return "shift";
+    case 0x111: return "ctrl";
+    case 0x144: return "alt";
+    }
+    return NULL;
+}
+
 static int cf_index(const char *const *list, int n, const char *name) {
     for (int i = 0; i < n; i++) if (strcmp(list[i], name) == 0) return i;
     return 0;
@@ -349,6 +372,25 @@ static void cf_adjust(const CfRow &r, int dir, int slot) {
     }
 }
 
+// Asigna una tecla concreta (captura) a la fila / hueco.
+static void cf_assign(const CfRow &r, int slot, const char *name) {
+    char v[160];
+    if (r.kind == RK_KEYS) {
+        cf_value(r, v, sizeof(v));
+        char sl[6][24];
+        int n = cf_split(v, sl, 6);
+        while (n <= slot && n < 6) snprintf(sl[n++], 24, "ninguna");
+        snprintf(sl[slot], 24, "%s", name);
+        char j[160];
+        cf_join(sl, n, j, sizeof(j));
+        cf_saved(cf_set(r.key, j));
+        cf_check_conflict(r, name);
+    } else if (r.kind == RK_KEY1) {
+        cf_saved(cf_set(r.key, name));
+        cf_check_conflict(r, name);
+    }
+}
+
 static void cf_clear_slot(const CfRow &r, int slot) {
     char v[160];
     if (r.kind == RK_KEYS) {
@@ -460,6 +502,9 @@ static void cf_draw_row(const CfRow &r, int y, bool sel, int slot) {
 }
 
 static const char *cf_footer(int kind) {
+    bool kb = (plat_devices() & 1) != 0;
+    if (kb && (kind == RK_KEYS)) return "Enter: pulsa la nueva tecla   1/2: tecla 1 o 2   Retroceso: quitar   R: defecto   Esc: volver";
+    if (kb && (kind == RK_KEY1)) return "Enter: pulsa la nueva tecla   Izq/Der: lista   Retroceso: ninguna   R: defecto   Esc: volver";
     switch (kind) {
     case RK_PRESET: return "Izq/Der o X: aplicar preajuste     Triangulo: Normal     O: volver";
     case RK_NUM: return "Izq/Der: cambiar (mantenlo para ir rapido)     Triangulo: por defecto     O: volver";
@@ -468,6 +513,8 @@ static const char *cf_footer(int kind) {
     default: return "Izq/Der: cambiar     Cuadrado: ninguna     Triangulo: por defecto     O: volver";
     }
 }
+
+static bool g_cfCapturing = false;
 
 static void cf_draw(int pg, int sel, int top, int slot) {
     FB = plat_framebuffer();
@@ -501,6 +548,16 @@ static void cf_draw(int pg, int sel, int top, int slot) {
     }
     rrect(96, 944, 1728, 64, 20, RGB(30, 38, 62));
     text(126, 960, cf_footer(P.rows[sel].kind), 2, C_DIM);
+    if (g_cfCapturing) {
+        rrect(380, 380, 1160, 260, 30, RGB(24, 30, 50));
+        rframe(380, 380, 1160, 260, 30, 4, BLUE, 255);
+        char t[120];
+        snprintf(t, sizeof(t), "Pulsa la nueva tecla para: %s", P.rows[sel].label);
+        text(960 - text_w(t, 2) / 2, 440, t, 2, C_TXT);
+        text(960 - text_w("(Shift, Ctrl y Alt tambien valen)", 2) / 2, 500, "(Shift, Ctrl y Alt tambien valen)", 2, C_DIM);
+        text(960 - text_w("Esc o clic derecho: cancelar", 2) / 2, 570, "Esc o clic derecho: cancelar", 2, C_DIM);
+    }
+    draw_cursor();
 }
 
 // ---------------- bucle de la pantalla ----------------
@@ -510,19 +567,119 @@ static bool cf_rep(uint32_t held, uint32_t m, int &cnt, int first, int every) {
     return h == 0 || (h >= first && (h - first) % every == 0);
 }
 
+static const int CF_VX = 880, CF_LY = 212, CF_ROWH = 64, CF_VIS = 10;
+
+// Valor del deslizador segun la posicion x del cursor (ajustado al paso).
+static void cf_slider_to(const CfRow &r, int x) {
+    int bx = CF_VX + 40, bw = 520;
+    long rel = x - bx;
+    if (rel < 0) rel = 0;
+    if (rel > bw) rel = bw;
+    int span = r.mx - r.mn;
+    int v = r.mn + (int)((long)span * rel / bw);
+    v = r.mn + ((v - r.mn + r.st / 2) / r.st) * r.st;
+    if (v > r.mx) v = r.mx;
+    char cur[48], t[24];
+    cf_value(r, cur, sizeof(cur));
+    if (cf_parse100(cur) == v) return;
+    cf_fmt100(v, t, sizeof(t));
+    cf_saved(cf_set(r.key, t));
+}
+
+static void cf_begin_capture(bool &capturing) {
+    capturing = true;
+    g_cfCapturing = true;
+    plat_capture(true);
+}
+
 static void settings_screen() {
     cf_load();
     g_cfMsg[0] = 0;
     g_cfMsgTtl = 0;
     int pg = 0, sel = 0, top = 0, slot = 0, confirm = 0;
     int cu = 0, cd = 0, cl = 0, cr = 0;
+    bool capturing = false;
+    int dragRow = -1, dragWait = 0;
     uint32_t prev = plat_buttons();
+    plat_key_event();
     for (;;) {
         uint32_t held = plat_buttons();
         uint32_t press = held & ~prev;
         prev = held;
+        int kev = plat_key_event();
+        const PlatPointer *mp = plat_pointer();
         const CfPage &P = CF_PAGE[pg];
         const CfRow &R = P.rows[sel];
+        bool kb = (plat_devices() & 1) != 0;
+
+        if (capturing) {
+            if (kev == 41 || (press & BTN_CIRCLE)) {
+                capturing = false; g_cfCapturing = false; plat_capture(false);
+                cf_say(C_DIM, "Cancelado.");
+            } else if (kev) {
+                char buf[8];
+                const char *nm = cf_hid_name(kev, buf);
+                capturing = false; g_cfCapturing = false; plat_capture(false);
+                if (nm) cf_assign(R, slot, nm);
+                else cf_say(C_WARN, "Esa tecla no esta soportada por el plugin.");
+            }
+            if (g_cfMsgTtl > 0) g_cfMsgTtl--;
+            cf_draw(pg, sel, top, slot);
+            plat_present();
+            continue;
+        }
+
+        // ---- teclado: 1 y 2 eligen el hueco de tecla ----
+        if (R.kind == RK_KEYS && kev == 30) slot = 0;
+        if (R.kind == RK_KEYS && kev == 31) slot = 1;
+
+        // ---- raton ----
+        if (mp->leftPressed) {
+            int mx = mp->x, my = mp->y;
+            if (my >= 124 && my < 184) {
+                for (int i = 0; i < CF_PAGES; i++)
+                    if (mx >= 96 + i * 412 && mx < 96 + i * 412 + 392) { pg = i; sel = top = slot = 0; confirm = 0; }
+            } else if (my >= CF_LY && my < CF_LY + CF_VIS * CF_ROWH && mx >= 96 && mx < 1824) {
+                int idx = top + (my - CF_LY) / CF_ROWH;
+                if (idx < P.n && (my - CF_LY) % CF_ROWH < 56) {
+                    if (idx != sel) slot = 0;
+                    sel = idx;
+                    const CfRow &Q = P.rows[sel];
+                    if (mx >= CF_VX) {
+                        switch (Q.kind) {
+                        case RK_PRESET: cf_adjust(Q, mx < CF_VX + 220 ? -1 : +1, 0); break;
+                        case RK_NUM:
+                            if (mx < CF_VX + 30) cf_adjust(Q, -1, 0);
+                            else if (mx >= CF_VX + 580) cf_adjust(Q, +1, 0);
+                            else { cf_slider_to(Q, mx); dragRow = sel; dragWait = 0; }
+                            break;
+                        case RK_BOOL: cf_adjust(Q, +1, 0); break;
+                        case RK_KEYS:
+                            slot = mx >= CF_VX + 290 ? 1 : 0;
+                            if (kb) cf_begin_capture(capturing);
+                            break;
+                        case RK_KEY1:
+                            if (mx < CF_VX + 30) cf_adjust(Q, -1, 0);
+                            else if (mx >= CF_VX + 345) cf_adjust(Q, +1, 0);
+                            else if (kb) cf_begin_capture(capturing);
+                            break;
+                        case RK_BTN:
+                            cf_adjust(Q, mx < CF_VX + 30 ? -1 : +1, 0);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (dragRow >= 0) {
+            if (mp->left && dragRow == sel) {
+                if (++dragWait >= 3) { cf_slider_to(P.rows[sel], mp->x); dragWait = 0; }
+            } else {
+                if (dragRow == sel) cf_slider_to(P.rows[sel], mp->x);
+                dragRow = -1;
+            }
+        }
+        if (capturing) continue;
 
         if (press & BTN_CIRCLE) break;
         if (cf_rep(held, BTN_UP, cu, 18, 4)) { sel = (sel + P.n - 1) % P.n; slot = 0; }
@@ -531,14 +688,16 @@ static void settings_screen() {
         if (cf_rep(held, BTN_LEFT, cl, 18, fast)) cf_adjust(R, -1, slot);
         if (cf_rep(held, BTN_RIGHT, cr, 18, fast)) cf_adjust(R, +1, slot);
         if (press & BTN_CROSS) {
-            if (R.kind == RK_KEYS) slot = 1 - slot;
-            else if (R.kind == RK_BOOL || R.kind == RK_PRESET) cf_adjust(R, +1, slot);
+            if (R.kind == RK_KEYS || R.kind == RK_KEY1) {
+                if (kb) cf_begin_capture(capturing);
+                else if (R.kind == RK_KEYS) slot = 1 - slot;
+            } else if (R.kind == RK_BOOL || R.kind == RK_PRESET || R.kind == RK_BTN) cf_adjust(R, +1, slot);
         }
         if (press & BTN_SQUARE) cf_clear_slot(R, slot);
         if (press & BTN_TRIANGLE) cf_reset_row(R);
         if (press & BTN_OPTIONS) {
             if (confirm > 0) { cf_reset_page(P); confirm = 0; }
-            else { confirm = 60 * 4; cf_say(C_WARN, "Pulsa Options otra vez para restaurar TODA esta pagina."); }
+            else { confirm = 60 * 4; cf_say(C_WARN, "Pulsa Options (o) otra vez para restaurar TODA esta pagina."); }
         }
         if (confirm > 0) confirm--;
         if (press & (BTN_L1 | BTN_R1)) {
@@ -549,11 +708,12 @@ static void settings_screen() {
         const CfPage &P2 = CF_PAGE[pg];
         if (sel >= P2.n) sel = P2.n - 1;
         if (sel < top) top = sel;
-        if (sel >= top + 10) top = sel - 9;
+        if (sel >= top + CF_VIS) top = sel - CF_VIS + 1;
         if (g_cfMsgTtl > 0) g_cfMsgTtl--;
         cf_draw(pg, sel, top, slot);
         plat_present();
     }
+    plat_capture(false);
     free(g_cfg);
     g_cfg = NULL;
 }

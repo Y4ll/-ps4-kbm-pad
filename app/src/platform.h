@@ -61,3 +61,21 @@ bool plat_game_in_background();
 int plat_resume_game(const char *cusa);
 int plat_big_app_id();  // AppId del juego en segundo plano (<= 0: ninguno), para diagnostico
 int plat_jb_status();  // resultado del jailbreak de la app (0 = ok, otro = error), para diagnostico
+
+// ---- Teclado y raton USB (opcionales: sin ellos todo funciona solo con el mando) ----
+// El teclado y el raton tambien generan BTN_* en plat_buttons(): flechas, Enter/Espacio (X), Esc (O),
+// Retroceso/Supr (cuadrado), U/R (triangulo), Tab o AvPag (R1), Shift+Tab o RePag (L1), O/F1 (Options),
+// clic derecho (O) y rueda (arriba/abajo).
+struct PlatPointer {
+    int x, y;           // posicion del cursor en pantalla (0..SCREEN_W-1, 0..SCREEN_H-1)
+    bool active;        // el raton se movio alguna vez: se dibuja el cursor
+    bool left;          // boton izquierdo mantenido
+    bool leftPressed;   // flanco de bajada: se pulso en este cuadro
+    bool leftReleased;  // se solto en este cuadro
+};
+const PlatPointer *plat_pointer();
+int plat_devices();      // bit0 = teclado abierto, bit1 = raton abierto
+// Captura de teclas: con plat_capture(true) el teclado deja de generar BTN_* y plat_key_event() devuelve
+// el codigo HID de la tecla recien pulsada (0 = ninguna). Modificadores: 0x122 shift, 0x111 ctrl, 0x144 alt.
+void plat_capture(bool on);
+int plat_key_event();

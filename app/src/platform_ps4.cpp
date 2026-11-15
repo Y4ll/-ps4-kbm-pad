@@ -143,6 +143,211 @@ static void jailbreak_try() {
 }
 int plat_jb_status() { return g_jb; }
 
+
+// ---------- teclado y raton USB (se cargan en tiempo de ejecucion, igual que hace el plugin) ----------
+extern "C" const char *sceKernelGetFsSandboxRandomWord(void) __attribute__((weak));
+
+struct UsbKb {
+    uint32_t timestamp;
+    uint8_t padding[12];
+    int32_t unk1;
+    int32_t nkeys;
+    uint32_t locks;
+    uint32_t mods;
+    uint16_t keycodes[32];
+};
+struct UsbMouse {   // mismo formato que usa el plugin kbm_pad
+    uint64_t timestamp;
+    uint8_t connected;
+    uint8_t pad0[3];
+    uint32_t buttons;
+    int32_t xAxis, yAxis, wheel, tilt;
+    uint8_t reserve[8];
+};
+union UsbMouseBuf { UsbMouse m; uint8_t raw[128]; };
+
+static int (*kbInit)(void) = NULL;
+static int (*kbOpen)(int, int, int, void *) = NULL;
+static int (*kbRead)(int, void *) = NULL;
+static int (*msInit)(void) = NULL;
+static int (*msOpen)(int, int, int, void *) = NULL;
+static int (*msRead)(int, void *, int) = NULL;
+static int g_uid = 0;
+static int g_kbh[2] = {-1, -1};
+static int g_msh[2] = {-1, -1};
+static bool g_usbLoaded = false;
+static unsigned char g_zero8[8];
+static PlatPointer g_ptr;
+static bool g_capture = false;
+static int g_keyEvent = 0;
+static uint16_t g_prevKeys[64];
+static int g_prevN = 0;
+static uint32_t g_prevMods = 0;
+static int g_wheelQ = 0;          // muescas de rueda pendientes (una por cuadro)
+static int g_wheelDir = 0;
+static int g_usbRetry = 0;
+static bool g_rightPrev = false;
+
+static void *sym_from(const char *name, const char *fn) {
+    char path[160];
+    int h = -1;
+    const char *w = sceKernelGetFsSandboxRandomWord ? sceKernelGetFsSandboxRandomWord() : NULL;
+    if (w) {
+        snprintf(path, sizeof(path), "/%s/common/lib/%s", w, name);
+        h = sceKernelLoadStartModule(path, 0, NULL, 0, 0, 0);
+    }
+    if (h <= 0) {
+        snprintf(path, sizeof(path), "/system/common/lib/%s", name);
+        h = sceKernelLoadStartModule(path, 0, NULL, 0, 0, 0);
+    }
+    if (h <= 0) return NULL;
+    void *f = NULL;
+    if (sceKernelDlsym(h, fn, &f) < 0) return NULL;
+    return f;
+}
+
+static void usb_load() {
+    if (g_usbLoaded) return;
+    g_usbLoaded = true;
+    sceSysmoduleLoadModule(0x0106);   // teclado
+    sceSysmoduleLoadModule(0x00A9);   // raton
+    kbInit = (int (*)(void))sym_from("libSceKeyboard.sprx", "sceKeyboardInit");
+    kbOpen = (int (*)(int, int, int, void *))sym_from("libSceKeyboard.sprx", "sceKeyboardOpen");
+    kbRead = (int (*)(int, void *))sym_from("libSceKeyboard.sprx", "sceKeyboardReadState");
+    msInit = (int (*)(void))sym_from("libSceMouse.sprx", "sceMouseInit");
+    msOpen = (int (*)(int, int, int, void *))sym_from("libSceMouse.sprx", "sceMouseOpen");
+    msRead = (int (*)(int, void *, int))sym_from("libSceMouse.sprx", "sceMouseRead");
+    if (!kbInit || !kbOpen || !kbRead) kbRead = NULL;
+    if (!msInit || !msOpen || !msRead) msRead = NULL;
+}
+
+static void usb_open() {
+    if (kbRead && g_kbh[0] < 0) {
+        kbInit();
+        static const int tries[4][2] = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};   // {indice, con_params}
+        int nf = 0;
+        for (int k = 0; k < 4 && nf < 2; k++) {
+            int h = kbOpen(g_uid, 0, tries[k][0], tries[k][1] ? (void *)g_zero8 : NULL);
+            if (h < 0) continue;
+            if (nf == 1 && h == g_kbh[0]) continue;
+            g_kbh[nf++] = h;
+        }
+    }
+    if (msRead && g_msh[0] < 0) {
+        msInit();
+        for (int idx = 0; idx < 2; idx++) {
+            int h = msOpen(g_uid, 0, idx, g_zero8);
+            if (h < 0) continue;
+            if (g_msh[0] < 0) g_msh[0] = h; else if (g_msh[1] < 0) g_msh[1] = h;
+        }
+        if (g_msh[0] < 0) g_msh[0] = msOpen(g_uid, 0, 0, NULL);
+    }
+}
+
+int plat_devices() { return (g_kbh[0] >= 0 ? 1 : 0) | (g_msh[0] >= 0 ? 2 : 0); }
+const PlatPointer *plat_pointer() { return &g_ptr; }
+void plat_capture(bool on) { g_capture = on; g_keyEvent = 0; }
+int plat_key_event() { int k = g_keyEvent; g_keyEvent = 0; return k; }
+
+static bool kd_has(const uint16_t *k, int n, int code) {
+    for (int i = 0; i < n; i++) if (k[i] == code) return true;
+    return false;
+}
+
+// Lee teclado y raton; devuelve los BTN_* que generan.
+static uint32_t usb_poll() {
+    if (!g_usbLoaded) return 0;
+    if (g_kbh[0] < 0 && g_msh[0] < 0 && (g_usbRetry++ % 120) == 0) usb_open();   // por si se conectan despues
+    else if ((g_kbh[0] < 0 || g_msh[0] < 0) && (g_usbRetry++ % 240) == 0) usb_open();
+
+    uint32_t m = 0;
+    // ---- teclado ----
+    uint16_t keys[64];
+    int n = 0;
+    uint32_t mods = 0;
+    for (int i = 0; i < 2; i++) {
+        if (g_kbh[i] < 0 || !kbRead) continue;
+        UsbKb kd;
+        memset(&kd, 0, sizeof(kd));
+        if (kbRead(g_kbh[i], &kd) < 0) continue;
+        mods |= kd.mods;
+        for (int k = 0; k < kd.nkeys && k < 32 && n < 64; k++)
+            if (kd.keycodes[k]) keys[n++] = kd.keycodes[k];
+    }
+    bool shift = (mods & 0x22) != 0;
+    // eventos de pulsacion (para capturar teclas)
+    int ev = 0;
+    for (int i = 0; i < n && !ev; i++) if (!kd_has(g_prevKeys, g_prevN, keys[i])) ev = keys[i];
+    if (!ev && n == 0) {   // modificador solo: se acepta al pulsarlo (sin otra tecla)
+        uint32_t nw = mods & ~g_prevMods;
+        if (nw & 0x22) ev = 0x122; else if (nw & 0x11) ev = 0x111; else if (nw & 0x44) ev = 0x144;
+    }
+    if (ev) g_keyEvent = ev;
+    if (!g_capture) {
+        for (int i = 0; i < n; i++) {
+            switch (keys[i]) {
+            case 82: m |= BTN_UP; break;
+            case 81: m |= BTN_DOWN; break;
+            case 80: m |= BTN_LEFT; break;
+            case 79: m |= BTN_RIGHT; break;
+            case 40: case 44: case 88: case 12: m |= BTN_CROSS; break;      // Enter, Espacio, Enter num, I
+            case 41: case 20: m |= BTN_CIRCLE; break;                        // Esc, Q
+            case 42: case 76: case 4: m |= BTN_SQUARE; break;                // Retroceso, Supr, A
+            case 24: case 21: m |= BTN_TRIANGLE; break;                      // U, R
+            case 18: case 58: m |= BTN_OPTIONS; break;                       // O, F1
+            case 78: m |= BTN_R1; break;                                     // AvPag
+            case 75: m |= BTN_L1; break;                                     // RePag
+            case 43: m |= shift ? BTN_L1 : BTN_R1; break;                    // Tab / Shift+Tab
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) g_prevKeys[i] = keys[i];
+    g_prevN = n;
+    g_prevMods = mods;
+
+    // ---- raton ----
+    int dx = 0, dy = 0, wheel = 0;
+    uint32_t btn = 0;
+    bool got = false;
+    for (int h = 0; h < 2 && msRead; h++) {
+        if (g_msh[h] < 0) continue;
+        for (int i = 0; i < 256; i++) {
+            UsbMouseBuf mb;
+            memset(&mb, 0, sizeof(mb));
+            if (msRead(g_msh[h], &mb, 1) <= 0) break;
+            if (mb.m.timestamp == 0 && !mb.m.connected && !mb.m.buttons && !mb.m.xAxis && !mb.m.yAxis && !mb.m.wheel) break;
+            dx += mb.m.xAxis; dy += mb.m.yAxis; wheel += mb.m.wheel;
+            btn = mb.m.buttons;
+            got = true;
+        }
+    }
+    if (got) {
+        if (dx || dy) g_ptr.active = true;
+        g_ptr.x += dx * 2; g_ptr.y += dy * 2;
+        if (g_ptr.x < 0) g_ptr.x = 0;
+        if (g_ptr.y < 0) g_ptr.y = 0;
+        if (g_ptr.x > SCREEN_W - 1) g_ptr.x = SCREEN_W - 1;
+        if (g_ptr.y > SCREEN_H - 1) g_ptr.y = SCREEN_H - 1;
+        bool l = (btn & 1) != 0;
+        g_ptr.leftPressed = l && !g_ptr.left;
+        g_ptr.leftReleased = !l && g_ptr.left;
+        g_ptr.left = l;
+        bool r = (btn & 2) != 0;
+        if (r && !g_rightPrev) m |= BTN_CIRCLE;   // clic derecho = volver
+        g_rightPrev = r;
+        if (wheel) { g_wheelDir = wheel > 0 ? 1 : -1; g_wheelQ += wheel > 0 ? wheel : -wheel; if (g_wheelQ > 6) g_wheelQ = 6; }
+        if (l || r) g_ptr.active = true;
+    } else {
+        g_ptr.leftPressed = g_ptr.leftReleased = false;
+    }
+    if (g_wheelQ > 0) {   // una muesca por cuadro, con un cuadro libre entre muescas
+        static bool gap = false;
+        if (!gap) { m |= g_wheelDir > 0 ? BTN_UP : BTN_DOWN; g_wheelQ--; }
+        gap = !gap;
+    }
+    return m;
+}
+
 bool plat_init() {
     jailbreak_try();  // si falla no es fatal: la app sigue, pero no podra instalar en Minecraft
     g_video = sceVideoOutOpen(ORBIS_VIDEO_USER_MAIN, ORBIS_VIDEO_OUT_BUS_MAIN, 0, 0);
@@ -178,14 +383,20 @@ bool plat_init() {
     sceUserServiceInitialize(&p);
     int32_t uid = 0;
     sceUserServiceGetInitialUser(&uid);
+    g_uid = uid;
     g_pad = scePadOpen(uid, 0, 0, NULL);
-    return g_pad >= 0;
+    g_ptr.x = SCREEN_W / 2;
+    g_ptr.y = SCREEN_H / 2;
+    usb_load();   // teclado y raton: si falla, la app sigue solo con el mando
+    usb_open();
+    return g_pad >= 0 || plat_devices() != 0;
 }
 
 uint32_t plat_buttons() {
+    uint32_t usb = usb_poll();
     OrbisPadData d;
-    if (g_pad < 0 || scePadReadState(g_pad, &d) != 0) return 0;
-    uint32_t b = d.buttons, m = 0;
+    if (g_pad < 0 || scePadReadState(g_pad, &d) != 0) return usb;
+    uint32_t b = d.buttons, m = usb;
     if (b & ORBIS_PAD_BUTTON_UP) m |= BTN_UP;
     if (b & ORBIS_PAD_BUTTON_DOWN) m |= BTN_DOWN;
     if (b & ORBIS_PAD_BUTTON_LEFT) m |= BTN_LEFT;
