@@ -944,12 +944,19 @@ static void start_update_thread(void)
 #define KEY_ALT   0x144
 
 #define MOUSE_BTN_MIDDLE 0x4
+#define MOUSE_BTN_SIDE1  0x8
+#define MOUSE_BTN_SIDE2  0x10
+#define KBM_NMOUSE       7   /* izq, der, medio, lateral1, lateral2, rueda arriba, rueda abajo */
 
 typedef struct { uint16_t code; uint32_t mask; } KbmBind;
 #define KBM_MAX_BINDS 48
 static KbmBind  g_binds[KBM_MAX_BINDS];
 static int      g_nbinds;
-static uint32_t g_mouse_map[3];            /* izq, der, medio -> boton del mando */
+static uint32_t g_mouse_map[KBM_NMOUSE];   /* izq, der, medio, lat1, lat2, rueda+, rueda- -> boton del mando */
+static uint16_t g_k_walk;                  /* tecla de caminar (stick izquierdo a medias) */
+static float    g_sens_aim = 0.75f;        /* multiplicador de la camara mientras se apunta (L2) */
+static float    g_walk = 0.5f;             /* fuerza del stick izquierdo al caminar */
+static bool     g_smooth_dyn = true;       /* suavizado dinamico: menos retraso en giros rapidos */
 static uint16_t g_k_pause, g_k_drive, g_k_sens_up, g_k_sens_dn, g_k_reload;
 static uint16_t g_k_fwd, g_k_back, g_k_left, g_k_right;
 static float    g_sens_x, g_sens_y, g_smooth, g_deadzone, g_accel;
@@ -1002,6 +1009,9 @@ static const char k_ini_default[] =
     "curva=0.40\n"
     "invertir_y=0\n"
     "alternar_mira=0\n"
+    "# sens_mira: multiplicador de la camara mientras apuntas (L2). suavizado_dinamico=1: menos retraso en giros rapidos.\n"
+    "sens_mira=0.75\n"
+    "suavizado_dinamico=1\n"
     "\n"
     "# --- Ocultar teclado y raton al juego ---\n"
     "# ocultar=1: el juego solo ve un mando (no detecta el teclado ni el raton USB).\n"
@@ -1014,6 +1024,9 @@ static const char k_ini_default[] =
     "tecla_sens_menos=f9\n"
     "tecla_sens_mas=f10\n"
     "tecla_recargar=f6\n"
+    "# tecla_caminar: mantenla para mover el personaje a medias (caminar). caminar = fuerza 0.1-0.9.\n"
+    "tecla_caminar=ninguna\n"
+    "caminar=0.50\n"
     "\n"
     "# --- Movimiento (stick izquierdo) ---\n"
     "adelante=w\n"
@@ -1043,6 +1056,11 @@ static const char k_ini_default[] =
     "raton_izq=r2\n"
     "raton_der=l2\n"
     "raton_medio=r3\n"
+    "# Botones laterales y rueda (opcionales). Si la rueda va al reves, intercambia arriba y abajo.\n"
+    "raton_lat1=ninguna\n"
+    "raton_lat2=ninguna\n"
+    "rueda_arriba=ninguna\n"
+    "rueda_abajo=ninguna\n"
     "\n"
     "# Modo conducir (tecla_conducir, F7): W = acelerar (R2), S = frenar o reversa (L2),\n"
     "# A y D = volante. Vuelve a pulsarla para regresar al modo normal.\n";
@@ -1160,6 +1178,12 @@ static void config_defaults(void)
     g_mouse_map[0] = KBM_PAD_BUTTON_R2;
     g_mouse_map[1] = KBM_PAD_BUTTON_L2;
     g_mouse_map[2] = KBM_PAD_BUTTON_R3;
+    for (int i = 3; i < KBM_NMOUSE; i++)
+        g_mouse_map[i] = 0;
+    g_k_walk = KEY_NONE;
+    g_sens_aim = 0.75f;
+    g_walk = 0.5f;
+    g_smooth_dyn = true;
     g_k_pause = TOGGLE_KEYCODE;   /* F8 */
     g_k_drive = 64;               /* F7 */
     g_k_sens_dn = 66;             /* F9 */
@@ -1195,6 +1219,9 @@ static void ini_apply(const char *key, const char *val)
     if (kbm_streq(key, "invertir_y"))  { g_invert_y = parse_float(val) != 0.0f; return; }
     if (kbm_streq(key, "ocultar")) { g_hide = parse_float(val) != 0.0f; return; }
     if (kbm_streq(key, "alternar_mira")) { g_aim_toggle = parse_float(val) != 0.0f; return; }
+    if (kbm_streq(key, "sens_mira"))   { g_sens_aim = kbm_clampf(parse_float(val), 0.1f, 3.0f); return; }
+    if (kbm_streq(key, "caminar"))     { g_walk = kbm_clampf(parse_float(val), 0.1f, 0.9f); return; }
+    if (kbm_streq(key, "suavizado_dinamico")) { g_smooth_dyn = parse_float(val) != 0.0f; return; }
 
     uint16_t *kp = NULL;
     if (kbm_streq(key, "tecla_pausa"))       kp = &g_k_pause;
@@ -1206,6 +1233,7 @@ static void ini_apply(const char *key, const char *val)
     else if (kbm_streq(key, "atras"))             kp = &g_k_back;
     else if (kbm_streq(key, "izquierda"))         kp = &g_k_left;
     else if (kbm_streq(key, "derecha"))           kp = &g_k_right;
+    else if (kbm_streq(key, "tecla_caminar"))     kp = &g_k_walk;
     if (kp) {
         uint16_t c = parse_key(val);
         if (c == KEY_BAD) ini_bad(key, val);
@@ -1217,6 +1245,10 @@ static void ini_apply(const char *key, const char *val)
     if (kbm_streq(key, "raton_izq")) mi = 0;
     else if (kbm_streq(key, "raton_der")) mi = 1;
     else if (kbm_streq(key, "raton_medio")) mi = 2;
+    else if (kbm_streq(key, "raton_lat1")) mi = 3;
+    else if (kbm_streq(key, "raton_lat2")) mi = 4;
+    else if (kbm_streq(key, "rueda_arriba")) mi = 5;
+    else if (kbm_streq(key, "rueda_abajo")) mi = 6;
     if (mi >= 0) {
         uint32_t m = find_button(val);
         if (m == 0 && !kbm_streq(val, "ninguno") && !kbm_streq(val, "ninguna")) ini_bad(key, val);
@@ -1260,7 +1292,7 @@ static char *ini_trim(char *s)
     return s;
 }
 
-static char g_ini[4096];
+static char g_ini[8192];
 
 static void config_load(void)
 {
@@ -1692,7 +1724,7 @@ static void apply_kbm(KbmPadData *d)
     }
 
     /* Raton: acumular deltas aunque este en pausa, para no acumular salto */
-    int32_t dx = 0, dy = 0;
+    int32_t dx = 0, dy = 0, wheel_acc = 0;
     /* Estado de botones PERSISTENTE: sin muestras nuevas (raton quieto) el boton
      * sigue como estaba. */
     static uint32_t g_mbtn;
@@ -1715,6 +1747,7 @@ static void apply_kbm(KbmPadData *d)
                 break;
             dx += mb.m.xAxis;
             dy += mb.m.yAxis;
+            wheel_acc += mb.m.wheel;
             if (mb.m.xAxis || mb.m.yAxis)
                 g_dbg_mmove++;
             if (mb.m.buttons != g_mbtn) {   /* diagnostico: cambios de botones al log */
@@ -1739,11 +1772,19 @@ static void apply_kbm(KbmPadData *d)
     }
     uint32_t mbtn = g_mbtn;
 
-    if (!g_enabled)
+    /* Rueda: cada giro mantiene el boton ~4 lecturas para que el juego lo vea */
+    static int wheel_up_t, wheel_dn_t;
+    if (wheel_acc > 0) { wheel_up_t = 4; wheel_dn_t = 0; }
+    else if (wheel_acc < 0) { wheel_dn_t = 4; wheel_up_t = 0; }
+
+    if (!g_enabled) {
+        wheel_up_t = wheel_dn_t = 0;
         return;
+    }
 
     bool k_fwd = key_down(&kd, g_k_fwd), k_back = key_down(&kd, g_k_back);
     bool k_left = key_down(&kd, g_k_left), k_right = key_down(&kd, g_k_right);
+    bool walking = key_down(&kd, g_k_walk);
 
     if (g_drive) {
         /* Conducir: W = acelerar (R2), S = frenar / reversa (L2), A y D = volante con
@@ -1765,28 +1806,12 @@ static void apply_kbm(KbmPadData *d)
                 lx *= 0.7071f;
                 ly *= 0.7071f;
             }
+            if (walking) {                    /* caminar: stick a medias */
+                lx *= g_walk;
+                ly *= g_walk;
+            }
             d->leftStick.x = to_axis(lx);
             d->leftStick.y = to_axis(ly);
-        }
-    }
-
-    /* Stick derecho = camara: sensibilidad por eje, curva y suavizado configurables */
-    float fx = (float)dx * g_sens_x / 127.0f;
-    float fy = (float)dy * g_sens_y / 127.0f;
-    if (g_invert_y)
-        fy = -fy;
-    fx *= 1.0f + g_accel * kbm_absf(fx);
-    fy *= 1.0f + g_accel * kbm_absf(fy);
-    g_rx = g_rx * g_smooth + fx * (1.0f - g_smooth);
-    g_ry = g_ry * g_smooth + fy * (1.0f - g_smooth);
-    {
-        /* El juego ignora el stick por debajo de su zona muerta: sin compensarla, los
-         * movimientos lentos del raton se perdian y la camara iba a saltos. */
-        float cx = comp_deadzone(g_rx), cy = comp_deadzone(g_ry);
-        if (cx != 0.0f || cy != 0.0f) {
-            d->rightStick.x = to_axis(cx);
-            d->rightStick.y = to_axis(cy);
-            g_dbg_stick++;
         }
     }
 
@@ -1808,6 +1833,12 @@ static void apply_kbm(KbmPadData *d)
         }
         if (mbtn & MOUSE_BTN_MIDDLE)
             pm |= g_mouse_map[2];
+        if (mbtn & MOUSE_BTN_SIDE1)
+            pm |= g_mouse_map[3];
+        if (mbtn & MOUSE_BTN_SIDE2)
+            pm |= g_mouse_map[4];
+        if (wheel_up_t > 0) { pm |= g_mouse_map[5]; wheel_up_t--; }
+        if (wheel_dn_t > 0) { pm |= g_mouse_map[6]; wheel_dn_t--; }
         if (pm)
             pad_press(d, pm);
     }
@@ -1816,6 +1847,40 @@ static void apply_kbm(KbmPadData *d)
     for (int i = 0; i < g_nbinds; i++)
         if (key_down(&kd, g_binds[i].code))
             pad_press(d, g_binds[i].mask);
+
+    /* Stick derecho = camara: sensibilidad por eje, curva y suavizado configurables.
+     * Se calcula al final para saber si se esta apuntando (L2). */
+    bool aiming = (d->buttons & KBM_PAD_BUTTON_L2) != 0 || d->analogButtons.l2 > 128;
+    float sx = g_sens_x, sy = g_sens_y;
+    if (aiming) {
+        sx *= g_sens_aim;
+        sy *= g_sens_aim;
+    }
+    float fx = (float)dx * sx / 127.0f;
+    float fy = (float)dy * sy / 127.0f;
+    if (g_invert_y)
+        fy = -fy;
+    fx *= 1.0f + g_accel * kbm_absf(fx);
+    fy *= 1.0f + g_accel * kbm_absf(fy);
+    /* Suavizado dinamico: los giros lentos se suavizan del todo y los rapidos casi nada,
+     * asi no hay retraso al girar de golpe. */
+    float sm = g_smooth;
+    if (g_smooth_dyn) {
+        float mag = kbm_absf(fx) > kbm_absf(fy) ? kbm_absf(fx) : kbm_absf(fy);
+        sm *= 1.0f - 0.6f * kbm_clampf(mag, 0.0f, 1.0f);
+    }
+    g_rx = g_rx * sm + fx * (1.0f - sm);
+    g_ry = g_ry * sm + fy * (1.0f - sm);
+    {
+        /* El juego ignora el stick por debajo de su zona muerta: sin compensarla, los
+         * movimientos lentos del raton se perdian y la camara iba a saltos. */
+        float cx = comp_deadzone(g_rx), cy = comp_deadzone(g_ry);
+        if (cx != 0.0f || cy != 0.0f) {
+            d->rightStick.x = to_axis(cx);
+            d->rightStick.y = to_axis(cy);
+            g_dbg_stick++;
+        }
+    }
 }
 
 /* Rellena un KbmPadData neutro cuando no hay mando fisico. */

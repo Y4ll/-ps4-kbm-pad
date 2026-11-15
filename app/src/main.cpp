@@ -691,7 +691,7 @@ static void draw_all(const char *busy) {
         text(bx + 144, by + 24, bt[i].title, 3, bt[i].enabled ? C_TXT : RGB(120, 128, 150));
         text(bx + 144, by + 80, bt[i].sub, 2, bt[i].enabled ? C_DIM : RGB(100, 108, 130));
     }
-    text(96, 898, "Tras instalar o cambiar algo, abre el juego (si ya estaba abierto, cierralo antes).", 2, RGB(120, 128, 150));
+    text(96, 898, "OPTIONS: ajustes de camara, teclas y raton.   Tras cambiar algo, abre el juego de nuevo.", 2, RGB(150, 160, 185));
 
     // ----- barra inferior con las teclas del juego y Salir
     rrect(96, 940, 1728, 76, 22, RGB(30, 38, 62));
@@ -703,6 +703,8 @@ static void draw_all(const char *busy) {
     glyph(3, 1824 - 40 - text_w("Salir", 2) - 44, 978, 22, false);
     text_r(1824 - 40, 962, "Salir", 2, C_TXT);
 }
+
+#include "settings.h"
 
 int main() {
     if (!plat_init()) return 1;
@@ -765,6 +767,12 @@ int main() {
         }
         if (press & BTN_TRIANGLE) {
             if (S.prx) { uninstall_plugin(); refresh(); }
+        }
+        if (press & BTN_OPTIONS) {
+            settings_screen();
+            g_msg[0] = 0;
+            refresh();
+            prev = plat_buttons();
         }
         if (++frame % 120 == 0) refresh();
         draw_all(NULL);

@@ -15,6 +15,16 @@ y mezcla en los datos del mando las entradas de un teclado y un ratón USB.
 > **Estado: sin probar en consola.** Compila contra los headers de OpenOrbis, pero
 > no se ha enlazado ni ejecutado en una PS4. Ver "Cosas por verificar".
 
+## Novedades (v17)
+
+- **kbm_manager > Options**: pantalla de ajustes (camara, botones, movimiento, raton) con
+  preajustes de camara. Todo se guarda en `kbm_pad.ini` y el plugin lo aplica solo.
+- `sens_mira`: la camara va mas lenta mientras apuntas (L2). `suavizado_dinamico=1`: menos
+  retraso en giros rapidos.
+- `tecla_caminar` y `caminar`: mantener la tecla mueve el personaje a medias.
+- `raton_lat1`, `raton_lat2`, `rueda_arriba`, `rueda_abajo`: botones laterales y rueda del raton
+  pueden ser cualquier boton del mando.
+
 ## Controles
 
 | Entrada | DualShock 4 |
