@@ -584,6 +584,16 @@ static void draw_all(const char *busy) {
     else fill(0, 0, SCREEN_W, SCREEN_H, RGB(20, 27, 50));
     const uint32_t PANEL = RGB(38, 48, 74), PANEL2 = RGB(70, 84, 116), LINE = RGB(66, 80, 118), BLUE = RGB(110, 160, 255);
     bool on = S.prx && S.listed && S.activo != 0;
+    static int knob = -1, animf = 0;   // animaciones: posicion del interruptor y pulso del resplandor
+    animf++;
+    {
+        int target = on ? 100 : 0;
+        if (knob < 0) knob = target;
+        int d = target - knob, stp = d / 4;
+        if (!stp && d) stp = d > 0 ? 1 : -1;
+        knob += stp;
+    }
+    const PlatPointer *hp = plat_pointer();
 
     // ----- cabecera (zona segura: 96 px a los lados, 54 arriba)
     for (int j = 0; j < 96; j++)
@@ -603,7 +613,8 @@ static void draw_all(const char *busy) {
 
     // ----- tarjeta principal: estado y interruptor
     const int HX = 96, HY = 188, HW = 944, HH = 424;
-    if (on) for (int i = 1; i <= 7; i++) rframe(HX - i * 2, HY - i * 2, HW + i * 4, HH + i * 4, 30 + i * 2, 3, BLUE, 46 - i * 6);
+    if (on) { int ph = animf % 150, tri = ph < 75 ? ph : 150 - ph; int mul = 70 + tri * 60 / 75;
+        for (int i = 1; i <= 7; i++) rframe(HX - i * 2, HY - i * 2, HW + i * 4, HH + i * 4, 30 + i * 2, 3, BLUE, (46 - i * 6) * mul / 100); }
     rrect(HX, HY, HW, HH, 30, PANEL);
     rframe(HX, HY, HW, HH, 30, on ? 4 : 3, on ? BLUE : LINE, 255);
     text(HX + 50, HY + 40, "TECLADO + RATON", 2, C_DIM);
@@ -615,9 +626,11 @@ static void draw_all(const char *busy) {
     // interruptor grande
     {
         int tx = HX + HW - 50 - 220, ty = HY + 36;
-        uint32_t track = !S.prx ? RGB(56, 64, 88) : (on ? BLUE : RGB(86, 96, 124));
+        uint32_t track = !S.prx ? RGB(56, 64, 88)
+            : RGB(86 + (110 - 86) * knob / 100, 96 + (160 - 96) * knob / 100, 124 + (255 - 124) * knob / 100);
         rrect(tx, ty, 220, 108, 54, track);
-        int kx = on ? tx + 220 - 54 : tx + 54;
+        int kx = tx + 54 + (220 - 108) * knob / 100;
+        if (S.prx) disc(kx, ty + 58, 46, RGB(0, 0, 0), 60);   // sombra del boton
         disc(kx, ty + 54, 44, S.prx ? RGB(235, 238, 245) : RGB(150, 158, 175));
     }
     // pista para el boton Cuadrado
@@ -686,8 +699,9 @@ static void draw_all(const char *busy) {
     };
     for (int i = 0; i < 3; i++) {
         int bx = 96 + i * (560 + 24), by = 760;
-        rrect(bx, by, 560, 124, 28, bt[i].enabled ? PANEL2 : PANEL);
-        if (bt[i].enabled) rframe(bx, by, 560, 124, 28, 3, BLUE, 255);
+        bool hov = bt[i].enabled && hp->active && hp->x >= bx && hp->x < bx + 560 && hp->y >= by && hp->y < by + 124;
+        rrect(bx, by, 560, 124, 28, bt[i].enabled ? (hov ? RGB(92, 110, 154) : PANEL2) : PANEL);
+        if (bt[i].enabled) rframe(bx, by, 560, 124, 28, hov ? 5 : 3, hov ? RGB(170, 200, 255) : BLUE, 255);
         glyph(bt[i].kind, bx + 76, by + 62, 36, !bt[i].enabled);
         text(bx + 144, by + 24, bt[i].title, 3, bt[i].enabled ? C_TXT : RGB(120, 128, 150));
         text(bx + 144, by + 80, bt[i].sub, 2, bt[i].enabled ? C_DIM : RGB(100, 108, 130));

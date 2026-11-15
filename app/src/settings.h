@@ -421,16 +421,16 @@ static void cf_reset_page(const CfPage &P) {
 
 // ---------------- dibujo ----------------
 static void cf_chip(int x, int y, int w, const char *label, bool active, bool dim) {
-    rrect(x, y + 6, w, 44, 12, active ? RGB(70, 96, 160) : RGB(52, 64, 96));
+    rrect(x, y + 10, w, 44, 12, RGB(20, 26, 44));                                   // sombra (borde de la tecla)
+    rrect(x, y + 6, w, 44, 12, active ? RGB(78, 108, 178) : RGB(60, 74, 110));      // cara de la tecla
+    hspan(x + 12, x + w - 12, y + 8, active ? RGB(130, 165, 235) : RGB(88, 104, 146), 255);   // brillo superior
     if (active) rframe(x, y + 6, w, 44, 12, 3, RGB(110, 160, 255), 255);
     int tw = text_w(label, 2);
     text(x + (w - tw) / 2, y + 12, label, 2, dim ? RGB(120, 130, 155) : C_TXT);
 }
 
 static void cf_draw_row(const CfRow &r, int y, bool sel, int slot) {
-    const uint32_t PANEL = RGB(38, 48, 74), PANEL2 = RGB(58, 72, 108), BLUE = RGB(110, 160, 255);
-    rrect(96, y, 1728, 56, 16, sel ? PANEL2 : PANEL);
-    if (sel) rframe(96, y, 1728, 56, 16, 3, BLUE, 255);
+    const uint32_t BLUE = RGB(110, 160, 255);
     text(126, y + 12, r.label, 2, sel ? C_TXT : RGB(200, 206, 220));
     char v[160], t[48];
     const int VX = 880;
@@ -452,6 +452,7 @@ static void cf_draw_row(const CfRow &r, int y, bool sel, int slot) {
         rrect(VX + 40, y + 23, 520, 10, 5, RGB(30, 38, 62));
         int fw = (int)(520L * (x - r.mn) / (r.mx - r.mn));
         if (fw >= 10) rrect(VX + 40, y + 23, fw, 10, 5, sel ? BLUE : RGB(90, 120, 190));
+        if (sel) disc(VX + 40 + fw, y + 28, 19, BLUE, 70);
         disc(VX + 40 + fw, y + 28, 11, sel ? RGB(235, 238, 245) : RGB(170, 178, 200));
         text(VX + 590, y + 12, ">", 2, C_DIM);
         text_r(1794, y + 12, t, 2, sel ? C_TXT : C_ACC);
@@ -515,6 +516,8 @@ static const char *cf_footer(int kind) {
 }
 
 static bool g_cfCapturing = false;
+static int g_cfSelY = -1000;   // posicion animada del resaltado
+static int g_cfFrame = 0;
 
 static void cf_draw(int pg, int sel, int top, int slot) {
     FB = plat_framebuffer();
@@ -529,15 +532,37 @@ static void cf_draw(int pg, int sel, int top, int slot) {
         int x = 96 + i * 412;
         bool a = i == pg;
         rrect(x, 124, 392, 60, 30, a ? PANEL2 : RGB(32, 40, 62));
-        if (a) rframe(x, 124, 392, 60, 30, 3, BLUE, 255);
+        if (a) { rframe(x, 124, 392, 60, 30, 3, BLUE, 255); rrect(x + 120, 178, 152, 4, 2, BLUE); }
         int tw = text_w(CF_PAGE[i].name, 2);
         text(x + (392 - tw) / 2, 124 + 14, CF_PAGE[i].name, 2, a ? C_TXT : C_DIM);
     }
     const CfPage &P = CF_PAGE[pg];
     const int ROWH = 64, VIS = 10, LY = 212;
+    g_cfFrame++;
+    const PlatPointer *hp = plat_pointer();
+    int hov = -1;
+    if (hp->active && hp->x >= 96 && hp->x < 1824 && hp->y >= LY && hp->y < LY + VIS * ROWH && (hp->y - LY) % ROWH < 56)
+        hov = top + (hp->y - LY) / ROWH;
+    for (int i = 0; i < VIS && top + i < P.n; i++)
+        rrect(96, LY + i * ROWH, 1728, 56, 16, top + i == hov ? RGB(46, 58, 90) : RGB(38, 48, 74));
+    // resaltado que se desliza hasta la fila elegida
+    int ty = LY + (sel - top) * ROWH;
+    if (g_cfSelY < -500 || g_cfSelY - ty > 700 || ty - g_cfSelY > 700) g_cfSelY = ty;
+    int dy = ty - g_cfSelY;
+    int stp = dy / 3;
+    if (!stp && dy) stp = dy > 0 ? 1 : -1;
+    g_cfSelY += stp;
+    rrect(96, g_cfSelY, 1728, 56, 16, PANEL2);
+    rframe(96, g_cfSelY, 1728, 56, 16, 3, BLUE, 255);
+    rrect(96, g_cfSelY + 8, 8, 40, 4, BLUE);
     for (int i = 0; i < VIS && top + i < P.n; i++) cf_draw_row(P.rows[top + i], LY + i * ROWH, top + i == sel, slot);
-    if (top > 0) text_r(1824, LY - 28, "^ mas arriba", 2, C_DIM);
-    if (top + VIS < P.n) text_r(1824, LY + VIS * ROWH - 4, "v mas abajo", 2, C_DIM);
+    if (P.n > VIS) {   // barra de desplazamiento
+        int trackH = VIS * ROWH - 8;
+        rrect(1836, LY, 8, trackH, 4, RGB(30, 38, 62));
+        int th = trackH * VIS / P.n;
+        int tt = LY + (trackH - th) * top / (P.n - VIS);
+        rrect(1836, tt, 8, th, 4, BLUE);
+    }
 
     rrect(96, 872, 1728, 56, 16, RGB(38, 48, 74));
     if (g_cfMsgTtl > 0 && g_cfMsg[0]) {
